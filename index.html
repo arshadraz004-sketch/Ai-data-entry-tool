@@ -1,0 +1,2400 @@
+<!DOCTYPE html>
+<html lang="en">
+  <script type="module">
+  import { initializeApp, getApps } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js";
+  import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js";
+  import { getFirestore, doc, setDoc, getDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js";
+  let cloudApp=null, cloudDb=null, cloudUser=null;
+  const CONFIG_KEY='aiDataEntryPro_firebaseConfig_v1';
+  const status=(msg,ok=false)=>{const el=document.getElementById('firebase-status');if(el){el.textContent=msg;el.className='text-xs '+(ok?'text-emerald-700':'text-amber-800');}};
+  window.connectFirebase=async function(){
+    try {
+      const raw=document.getElementById('firebase-config-input').value.trim();
+      let cfg; try { cfg=JSON.parse(raw); } catch(e) { throw new Error('Firebase config ko sahi JSON format mein paste karein.'); }
+      if(!cfg.apiKey||!cfg.projectId||!cfg.appId) throw new Error('Config mein apiKey, projectId aur appId zaroor hone chahiye.');
+      localStorage.setItem(CONFIG_KEY,JSON.stringify(cfg));
+      cloudApp=getApps().find(a=>a.name==='AIDataEntryPro')||initializeApp(cfg,'AIDataEntryPro');
+      cloudDb=getFirestore(cloudApp); const auth=getAuth(cloudApp);
+      const cred=await signInAnonymously(auth); cloudUser=cred.user;
+      window.__aiDataCloud={db:cloudDb,user:cloudUser,doc,setDoc,getDoc,serverTimestamp};
+      status('Firebase connected. User ID: '+cloudUser.uid,true);
+      await window.saveAllToFirebase(true);
+    } catch(e) { console.error(e); status('Connect nahi hua: '+(e.message||e)+' — Firebase Console mein Anonymous sign-in enable karein.'); }
+  };
+  window.saveAllToFirebase=async function(silent=false){
+    try {
+      const c=window.__aiDataCloud; if(!c){if(!silent)status('Pehle Firebase Connect dabayein.');return;}
+      const snap={savedAt:new Date().toISOString(),spreadsheet:JSON.parse(localStorage.getItem('aiDataEntryPro_spreadsheet_v1')||'null'),invoiceHistory:JSON.parse(localStorage.getItem('aiDataEntryPro_invoiceHistory_v1')||'[]'),stockItems:JSON.parse(localStorage.getItem('aiDataEntryPro_stock_v1')||'[]')};
+      await c.setDoc(c.doc(c.db,'users',c.user.uid,'appData','main'),{...snap,updatedAt:c.serverTimestamp()});
+      status('Firebase cloud backup saved: '+new Date().toLocaleString(),true);
+    } catch(e){console.error(e);status('Cloud save failed: '+(e.message||e)+' — Firestore Rules check karein.');}
+  };
+  window.restoreAllFromFirebase=async function(){
+    try {
+      const c=window.__aiDataCloud;if(!c){status('Pehle Firebase Connect dabayein.');return;}
+      const ref=c.doc(c.db,'users',c.user.uid,'appData','main'),res=await c.getDoc(ref);
+      if(!res.exists()){status('Cloud mein abhi data nahi mila. Pehle data save karein.');return;}
+      const d=res.data();if(!confirm('Cloud backup se spreadsheet, bills aur stock restore karna hai? Current local data replace ho sakta hai.'))return;
+      if(d.spreadsheet)localStorage.setItem('aiDataEntryPro_spreadsheet_v1',JSON.stringify(d.spreadsheet));
+      localStorage.setItem('aiDataEntryPro_invoiceHistory_v1',JSON.stringify(d.invoiceHistory||[]));localStorage.setItem('aiDataEntryPro_stock_v1',JSON.stringify(d.stockItems||[]));
+      status('Cloud data local device par restore ho gaya. Page reload karein.',true);alert('Cloud data restore ho gaya. Ab page reload karein.');
+    } catch(e){console.error(e);status('Restore failed: '+(e.message||e));}
+  };
+  window.addEventListener('DOMContentLoaded',()=>{try{const saved=localStorage.getItem(CONFIG_KEY);if(saved){document.getElementById('firebase-config-input').value=saved;status('Pehle se saved config mili hai. Firebase Connect dabayein.');}}catch(e){}});
+</script>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>AI Data Entry Pro - Mobile Edition</title>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- PDF.js for genuine client-side PDF parsing -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <!-- Tesseract.js for genuine client-side OCR -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <!-- xlsx-js-style for genuine .xlsx generation with cell styles & formula preservation -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+  <!-- Phosphor Icons -->
+  <script src="https://unpkg.com/@phosphor-icons/web"></script>
+
+  <script>
+    // Initialize PDF.js worker
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  </script>
+
+  <style>
+    /* Excel Table Gridlines & Professional Styling */
+    .excel-table {
+      border-collapse: collapse;
+      width: 100%;
+      border: 1px solid #cbd5e1;
+      table-layout: auto;
+    }
+    .excel-table th, 
+    .excel-table td {
+      border: 1px solid #cbd5e1;
+      padding: 6px 10px;
+      font-size: 13px;
+      line-height: 1.4;
+      vertical-align: middle;
+      white-space: nowrap;
+    }
+    
+    /* Header Row: Dark Blue with Bold White Text */
+    .excel-table th {
+      background-color: #1e40af; /* Blue-800 */
+      color: #ffffff;
+      font-weight: 700;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      user-select: none;
+    }
+
+    /* Alternating Light-Blue Rows */
+    .excel-table tbody tr:nth-child(even) {
+      background-color: #f0f7ff;
+    }
+    .excel-table tbody tr:nth-child(odd) {
+      background-color: #ffffff;
+    }
+    .excel-table tbody tr:hover {
+      background-color: #e0f2fe;
+    }
+    .excel-table tbody tr.target-cell-highlight td {
+      background-color: #fef08a !important; /* Soft yellow highlight */
+    }
+
+    /* Row index column */
+    .excel-table .row-idx {
+      background-color: #f8fafc;
+      color: #64748b;
+      font-weight: 600;
+      text-align: center;
+      width: 44px;
+      min-width: 44px;
+      user-select: none;
+    }
+
+    /* Active editable cell highlight */
+    .excel-table td[contenteditable="true"]:focus {
+      outline: 2px solid #2563eb;
+      outline-offset: -1px;
+      background-color: #ffffff !important;
+      box-shadow: 0 0 0 1px #2563eb inset;
+      z-index: 5;
+    }
+
+    .sheet-scroll-container {
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      max-height: 52vh;
+    }
+
+
+    /* Mobile-first usability improvements */
+    html { scroll-behavior: smooth; }
+    button, input, select, textarea { touch-action: manipulation; }
+    button { min-height: 40px; }
+    input, select, textarea { max-width: 100%; }
+    .sheet-scroll-container { max-width: 100%; }
+    @media (max-width: 640px) {
+      body { font-size: 14px; }
+      header .max-w-6xl { align-items: flex-start; gap: 8px; flex-wrap: wrap; }
+      header .max-w-6xl > div { min-width: 0; }
+      header h1 { font-size: 15px; }
+      main, section, .max-w-6xl { max-width: 100%; }
+      .px-6 { padding-left: 12px !important; padding-right: 12px !important; }
+      .p-6 { padding: 12px !important; }
+      .p-5 { padding: 12px !important; }
+      .p-4 { padding: 10px !important; }
+      .gap-6 { gap: 12px !important; }
+      .gap-4 { gap: 10px !important; }
+      .text-3xl { font-size: 1.5rem !important; line-height: 1.25 !important; }
+      .text-2xl { font-size: 1.25rem !important; }
+      input, select, textarea { font-size: 16px !important; }
+      button { white-space: normal; }
+      .sheet-scroll-container { max-height: 48vh; }
+      .excel-table th, .excel-table td { padding: 7px 8px; font-size: 12px; }
+      .rounded-xl, .rounded-lg { border-radius: 10px; }
+      .overflow-x-auto { -webkit-overflow-scrolling: touch; }
+    }
+    @media (max-width: 380px) {
+      header .text-\[11px\] { display: none; }
+      .excel-table th, .excel-table td { padding: 6px; font-size: 11px; }
+    }
+
+  </style>
+</head>
+<body class="bg-slate-100 text-slate-900 min-h-screen flex flex-col font-sans">
+
+  <!-- TOP APP BAR -->
+  <header class="bg-blue-900 text-white shadow-md sticky top-0 z-40">
+    <div class="max-w-6xl mx-auto px-3 py-2.5 flex items-center justify-between">
+      <div class="flex items-center space-x-2">
+        <i class="ph-fill ph-file-xls text-2xl text-emerald-400"></i>
+        <div>
+          <h1 class="text-base font-bold leading-tight">AI Data Entry Pro <span class="text-xs font-normal bg-blue-800 text-blue-200 px-1.5 py-0.5 rounded ml-1">Formulas Live</span></h1>
+          <p class="text-[11px] text-blue-200">Interactive Formula Assistant &bull; Safe Engine</p>
+        </div>
+      </div>
+      
+      <!-- Quick Load Test Scenarios -->
+      <div class="flex items-center gap-1.5 overflow-x-auto py-1">
+        <button onclick="loadSampleScenario('BILL')" class="text-xs bg-amber-500 hover:bg-amber-600 text-slate-950 px-2.5 py-1.5 rounded flex items-center gap-1 font-bold shadow-xs transition" title="Test Item, Qty, Unit Price, Amount formulas">
+          <i class="ph-bold ph-receipt"></i> <span class="hidden sm:inline">Load Invoice (Qty×Price)</span><span class="sm:hidden">Invoice</span>
+        </button>
+      </div>
+    </div>
+    
+    <!-- SOURCE NAVIGATION TABS -->
+    <nav class="max-w-6xl mx-auto px-2 flex border-t border-blue-800 text-xs sm:text-sm overflow-x-auto">
+      <button onclick="switchTab('upload-tab')" id="tab-btn-upload" class="tab-btn flex-1 min-w-[130px] py-2 px-3 text-center font-medium border-b-2 border-white text-white flex items-center justify-center gap-1.5">
+        <i class="ph-bold ph-file-arrow-up text-base"></i> File Upload &amp; OCR
+      </button>
+      <button onclick="openFormulaAssistantPanel()" id="tab-btn-assistant" class="tab-btn flex-1 min-w-[140px] py-2 px-3 text-center font-bold border-b-2 border-transparent text-amber-300 hover:text-white flex items-center justify-center gap-1.5">
+        <i class="ph-bold ph-calculator text-base"></i> 🧮 Formula Assistant
+      </button>
+      <button onclick="switchTab('columns-tab')" id="tab-btn-columns" class="tab-btn flex-1 min-w-[130px] py-2 px-3 text-center font-medium border-b-2 border-transparent text-blue-200 hover:text-white flex items-center justify-center gap-1.5">
+        <i class="ph-bold ph-columns text-base"></i> Column Tools
+      </button>
+      <button onclick="switchTab('invoice-entry-panel')" id="tab-btn-invoice" class="tab-btn flex-1 min-w-[120px] py-2 px-3 text-center font-medium border-b-2 border-transparent text-blue-200 hover:text-white flex items-center justify-center gap-1.5">🧾 Bill Entry</button>
+      <button onclick="switchTab('invoice-history-panel')" id="tab-btn-history" class="tab-btn flex-1 min-w-[120px] py-2 px-3 text-center font-medium border-b-2 border-transparent text-blue-200 hover:text-white flex items-center justify-center gap-1.5">📚 Bill History</button>
+      <button onclick="switchTab('stock-panel')" id="tab-btn-stock" class="tab-btn flex-1 min-w-[110px] py-2 px-3 text-center font-medium border-b-2 border-transparent text-blue-200 hover:text-white flex items-center justify-center gap-1.5">📦 Stock</button>
+      <button onclick="switchTab('sales-report-panel')" id="tab-btn-sales" class="tab-btn flex-1 min-w-[120px] py-2 px-3 text-center font-medium border-b-2 border-transparent text-blue-200 hover:text-white flex items-center justify-center gap-1.5">📊 Sales Report</button>
+      <button onclick="switchTab('profit-calculator-panel')" id="tab-btn-profit" class="tab-btn flex-1 min-w-[120px] py-2 px-3 text-center font-medium border-b-2 border-transparent text-blue-200 hover:text-white flex items-center justify-center gap-1.5">💰 Profit</button>
+      <button onclick="switchTab('backup-panel')" id="tab-btn-backup" class="tab-btn flex-1 min-w-[120px] py-2 px-3 text-center font-medium border-b-2 border-transparent text-blue-200 hover:text-white flex items-center justify-center gap-1.5">🛡️ Backup</button>
+    </nav>
+  </header>
+
+  <!-- PRIVACY / HINDI BADGE BANNER -->
+  <div class="bg-amber-50 border-b border-amber-200 px-3 py-1 text-[11px] text-amber-900 flex items-center justify-between">
+    <div class="flex items-center gap-1.5">
+      <i class="ph-fill ph-shield-check text-emerald-600 text-sm flex-shrink-0"></i>
+      <span><strong>100% Client-Side Calculations:</strong> Formula calculations and OCR run privately on your device.</span>
+    </div>
+    <span class="text-[10px] bg-amber-200/80 px-2 py-0.5 rounded text-amber-950 font-semibold hidden sm:inline">Hindi &amp; English Headers Supported</span>
+  </div>
+
+  <!-- MAIN WRAPPER -->
+  <main class="flex-1 max-w-6xl w-full mx-auto p-3 sm:p-4 space-y-3">
+
+    <!-- STATUS / OCR LOADER -->
+    <div id="loader" class="hidden bg-white border border-blue-200 rounded-xl p-4 shadow-md text-center max-w-md mx-auto">
+      <div class="animate-spin rounded-full h-8 w-8 border-3 border-blue-600 border-t-transparent mx-auto mb-2"></div>
+      <p id="loader-status" class="text-xs font-semibold text-blue-900">Processing file...</p>
+      <div class="w-full bg-slate-200 rounded-full h-2 mt-2 max-w-xs mx-auto overflow-hidden">
+        <div id="loader-bar" class="bg-blue-600 h-2 rounded-full w-0 transition-all duration-300"></div>
+      </div>
+      <p id="loader-subtext" class="text-[11px] text-slate-500 mt-1">Analyzing coordinates...</p>
+      <button onclick="cancelCurrentProcessing()" class="mt-2.5 px-3 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-semibold rounded border border-rose-200 transition">
+        Cancel Processing
+      </button>
+    </div>
+
+    <!-- ERROR NOTIFICATION -->
+    <div id="error-box" class="hidden bg-rose-50 border border-rose-300 text-rose-800 p-3 rounded-lg text-xs flex items-start gap-2">
+      <i class="ph-bold ph-warning-circle text-rose-600 text-base flex-shrink-0 mt-0.5"></i>
+      <div class="flex-1">
+        <strong class="font-semibold block">Notification</strong>
+        <span id="error-message">Unable to perform action.</span>
+      </div>
+      <button onclick="hideError()" class="text-rose-500 hover:text-rose-700"><i class="ph-bold ph-x"></i></button>
+    </div>
+
+    <!-- EXPORT STATUS CARD -->
+    <div id="download-success-card" class="hidden bg-blue-50 border border-blue-300 text-blue-950 p-3 rounded-lg text-xs shadow-sm space-y-2">
+      <div class="flex items-start justify-between">
+        <div class="flex items-center gap-2">
+          <i class="ph-bold ph-cloud-arrow-down text-blue-700 text-xl flex-shrink-0"></i>
+          <div>
+            <strong class="font-bold text-blue-950 block" id="download-status-title">Download Initiated</strong>
+            <span id="download-status-desc" class="text-blue-800 text-[11px]">Generating formatted Excel workbook...</span>
+          </div>
+        </div>
+        <button onclick="document.getElementById('download-success-card').classList.add('hidden')" class="text-blue-700 hover:text-blue-900"><i class="ph-bold ph-x"></i></button>
+      </div>
+      <div class="flex flex-wrap items-center gap-2 pt-1 border-t border-blue-200">
+        <a id="download-again-btn" href="#" download="AI_Data_Entry_Export.xlsx" class="px-3 py-1.5 bg-blue-700 hover:bg-blue-800 text-white rounded font-bold text-xs flex items-center gap-1 shadow-xs transition">
+          <i class="ph-bold ph-arrow-counter-clockwise"></i> Download Excel Again
+        </a>
+        <button onclick="exportToCSV()" class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded font-semibold text-xs flex items-center gap-1 transition">
+          <i class="ph-bold ph-file-csv"></i> Download CSV
+        </button>
+      </div>
+    </div>
+
+    <!-- ============================================== -->
+    <!-- TAB 1: FILE INGESTION                          -->
+    <!-- ============================================== -->
+    <section id="upload-tab" class="tab-content bg-white p-3 rounded-lg border border-slate-300 shadow-sm space-y-2.5">
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+        <div>
+          <h2 class="text-sm font-bold text-slate-800 flex items-center gap-1.5">
+            <i class="ph-bold ph-upload-simple text-blue-700"></i> Document Ingestion &amp; Classification
+          </h2>
+          <p class="text-[11px] text-slate-500">
+            Upload Bills, Invoices, Attendance sheets or PDFs. Headers and columns are mapped automatically.
+          </p>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-1.5">
+          <label class="inline-flex items-center px-3 py-1.5 bg-blue-700 hover:bg-blue-800 text-white rounded font-semibold text-xs cursor-pointer shadow-xs transition gap-1">
+            <i class="ph-bold ph-plus-circle"></i> Upload File
+            <input type="file" id="primary-file-input" accept="image/*,application/pdf" class="hidden" onchange="handleFileSelected(event)" />
+          </label>
+          <button onclick="removeSelectedFile()" class="px-2.5 py-1.5 bg-slate-100 hover:bg-rose-50 text-slate-600 hover:text-rose-700 border border-slate-300 rounded font-semibold text-xs flex items-center gap-1 transition">
+            <i class="ph-bold ph-trash"></i> Remove File
+          </button>
+          <button onclick="confirmClearAll()" class="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 rounded font-semibold text-xs flex items-center gap-1 transition">
+            <i class="ph-bold ph-eraser"></i> Clear All
+          </button>
+        </div>
+      </div>
+
+      <!-- File Metadata Card -->
+      <div id="file-meta-card" class="hidden bg-slate-50 border border-slate-200 p-2 rounded-lg flex flex-wrap items-center justify-between gap-2 text-xs">
+        <div class="flex items-center gap-2">
+          <i id="file-meta-icon" class="ph-bold ph-file text-xl text-blue-700"></i>
+          <div>
+            <span id="file-meta-name" class="font-bold text-slate-800 block truncate max-w-xs sm:max-w-md">filename.pdf</span>
+            <span id="file-meta-details" class="text-[11px] text-slate-500">Ready</span>
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <span id="detected-type-chip" class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-800 border border-blue-200">
+            Document Ready
+          </span>
+          <button onclick="startProcessingStagedFile()" class="px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded shadow-xs transition flex items-center gap-1">
+            <i class="ph-bold ph-play"></i> Process
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================== -->
+    <!-- TAB 2: COLUMN TOOLS                            -->
+    <!-- ============================================== -->
+    <section id="columns-tab" class="tab-content hidden bg-white p-3 rounded-lg border border-slate-300 shadow-sm space-y-2">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 class="text-sm font-bold text-slate-800 flex items-center gap-1.5">
+            <i class="ph-bold ph-columns text-blue-700"></i> Column &amp; Duplicate Management
+          </h2>
+          <p class="text-[11px] text-slate-500">Insert custom columns, rename headings, and find duplicate rows.</p>
+        </div>
+        <div class="flex items-center gap-1.5">
+          <button onclick="promptAddColumn()" class="px-2.5 py-1.5 bg-blue-700 hover:bg-blue-800 text-white rounded text-xs font-semibold flex items-center gap-1 transition">
+            <i class="ph-bold ph-plus"></i> Add Column
+          </button>
+          <button onclick="highlightDuplicateRecords()" class="px-2.5 py-1.5 bg-amber-500 hover:bg-amber-600 text-white rounded text-xs font-semibold flex items-center gap-1 transition">
+            <i class="ph-bold ph-copy"></i> Check Duplicates
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========================================================= -->
+    <!-- FEATURE 1 & 6: FORMULA ASSISTANT PANEL (VISIBLE ON DEMAND)-->
+    <!-- ========================================================= -->
+    <div id="formula-assistant-panel" class="hidden bg-gradient-to-r from-amber-50 to-orange-50 border-2 border-amber-400 rounded-xl p-3.5 shadow-md space-y-3 transition-all duration-300">
+      <div class="flex items-center justify-between border-b border-amber-200 pb-2">
+        <div class="flex items-center gap-2">
+          <span class="p-1.5 bg-amber-500 text-white rounded-lg shadow-xs">
+            <i class="ph-bold ph-calculator text-lg"></i>
+          </span>
+          <div>
+            <h3 class="text-sm font-bold text-amber-950 flex items-center gap-1.5">
+              Formula Assistant <span class="text-[10px] bg-amber-200 text-amber-900 px-1.5 py-0.5 rounded font-mono font-bold">Safe No-Eval Engine</span>
+            </h3>
+            <p class="text-[11px] text-amber-800">Select formula, target cell, and range or enter custom expression.</p>
+          </div>
+        </div>
+        <button onclick="closeFormulaAssistantPanel()" class="text-amber-800 hover:text-amber-950 p-1 text-sm rounded hover:bg-amber-100" title="Close Panel">
+          <i class="ph-bold ph-x text-base"></i>
+        </button>
+      </div>
+
+      <!-- Controls Grid: Formula, Target Cell, Range -->
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+        
+        <!-- 1. Select Formula Dropdown -->
+        <div>
+          <label class="block font-bold text-slate-700 mb-1 flex items-center gap-1">
+            <i class="ph-bold ph-function text-amber-600"></i> Select Formula
+          </label>
+          <select id="fa-formula-select" onchange="handleFormulaSelectionChange()" class="w-full bg-white border border-slate-300 rounded-lg p-2 font-medium text-slate-800 focus:ring-2 focus:ring-amber-500 focus:outline-none min-h-[42px]">
+            <optgroup label="Standard Math &amp; Stats">
+              <option value="SUM">SUM - Add numbers in range</option>
+              <option value="AVERAGE">AVERAGE - Calculate mean value</option>
+              <option value="COUNT">COUNT - Count numeric cells</option>
+              <option value="COUNTA">COUNTA - Count non-empty cells</option>
+              <option value="MAX">MAX - Maximum value</option>
+              <option value="MIN">MIN - Minimum value</option>
+              <option value="ROUND">ROUND - Round to 2 decimals</option>
+            </optgroup>
+            <optgroup label="Business &amp; Invoices">
+              <option value="QTY_PRICE" selected>Quantity × Unit Price (Line Item)</option>
+              <option value="SUBTOTAL">Subtotal (SUM of Amounts)</option>
+              <option value="GST">GST / Tax Calculation (18%)</option>
+              <option value="GRAND_TOTAL">Grand Total (Subtotal + Tax)</option>
+              <option value="PERCENT">Percentage (Val1 / Val2 × 100)</option>
+            </optgroup>
+            <optgroup label="Logic &amp; Conditions">
+              <option value="IF">IF Condition (e.g. >=100, High, Low)</option>
+              <option value="SUMIF">SUMIF - Sum with Criteria</option>
+              <option value="COUNTIF">COUNTIF - Count with Criteria</option>
+            </optgroup>
+            <optgroup label="Custom Formula">
+              <option value="CUSTOM">Custom Expression (=...)</option>
+            </optgroup>
+          </select>
+        </div>
+
+        <!-- 2. Select Target Cell Dropdown & Direct Input -->
+        <div>
+          <label class="block font-bold text-slate-700 mb-1 flex items-center gap-1">
+            <i class="ph-bold ph-crosshair text-amber-600"></i> Select Target Cell
+          </label>
+          <div class="flex gap-1.5">
+            <select id="fa-target-cell-dropdown" onchange="syncTargetCellFromDropdown()" class="flex-1 bg-white border border-slate-300 rounded-lg p-2 text-xs font-mono font-semibold text-slate-800 focus:ring-2 focus:ring-amber-500 focus:outline-none min-h-[42px]">
+              <!-- Dynamically populated -->
+            </select>
+            <input type="text" id="fa-target-cell-input" oninput="updateFormulaPreview()" placeholder="D2" 
+                   class="w-20 bg-white border border-slate-300 rounded-lg p-2 font-mono font-bold text-center text-blue-900 focus:ring-2 focus:ring-amber-500 focus:outline-none uppercase min-h-[42px]" />
+          </div>
+        </div>
+
+        <!-- 3. Select Data Range Dropdown & Custom Range Input -->
+        <div>
+          <label class="block font-bold text-slate-700 mb-1 flex items-center gap-1">
+            <i class="ph-bold ph-selection text-amber-600"></i> Select Data Range
+          </label>
+          <div class="flex gap-1.5">
+            <select id="fa-data-range-dropdown" onchange="syncDataRangeFromDropdown()" class="flex-1 bg-white border border-slate-300 rounded-lg p-2 text-xs font-mono font-medium text-slate-800 focus:ring-2 focus:ring-amber-500 focus:outline-none min-h-[42px]">
+              <!-- Dynamically populated with columns like D2:D8 -->
+            </select>
+            <input type="text" id="fa-data-range-input" oninput="updateFormulaPreview()" placeholder="D2:D9" 
+                   class="w-24 bg-white border border-slate-300 rounded-lg p-2 font-mono font-medium text-center text-slate-800 focus:ring-2 focus:ring-amber-500 focus:outline-none uppercase min-h-[42px]" />
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Formula Input Field & Live Preview Bar -->
+      <div class="bg-white p-2.5 rounded-lg border border-amber-300 flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+        <div class="flex-1">
+          <label class="text-[10px] font-bold uppercase tracking-wider text-slate-500 block mb-0.5">Formula Input (Live Synchronized)</label>
+          <div class="relative">
+            <span class="absolute left-2.5 top-2 text-slate-400 font-serif italic font-bold">fx</span>
+            <input type="text" id="fa-formula-input" oninput="updateCalculatedResultPreview()" placeholder="=SUM(D2:D9)" 
+                   class="w-full pl-8 pr-2 py-1.5 font-mono text-xs font-bold text-blue-900 bg-slate-50 border border-slate-300 rounded focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none min-h-[38px]" />
+          </div>
+        </div>
+
+        <!-- Preview Result Box -->
+        <div class="sm:w-48 bg-amber-50 border border-amber-200 rounded p-2 flex flex-col justify-center">
+          <span class="text-[10px] font-bold text-amber-800 uppercase">Calculated Result</span>
+          <span id="fa-calc-preview" class="font-mono font-bold text-sm text-slate-900 truncate">0.00</span>
+        </div>
+      </div>
+
+      <!-- Helper / Multiple rows toggle for line items -->
+      <div id="fa-batch-row-wrapper" class="hidden flex items-center gap-2 text-xs text-amber-950">
+        <input type="checkbox" id="fa-apply-all-rows" class="rounded text-amber-600 focus:ring-0 w-4 h-4 cursor-pointer" checked />
+        <label for="fa-apply-all-rows" class="cursor-pointer font-medium">Apply formula across all data rows in target column (e.g., D2, D3, D4...)</label>
+      </div>
+
+      <!-- Action Buttons Row -->
+      <div class="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-amber-200">
+        <span class="text-[11px] text-amber-800 flex items-center gap-1">
+          <i class="ph-bold ph-info"></i> Validated before applying. Automatically recalculates on data change.
+        </span>
+        <div class="flex items-center gap-2">
+          <button onclick="closeFormulaAssistantPanel()" class="px-3.5 py-2 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded-lg text-xs font-semibold min-h-[42px] transition">
+            Cancel
+          </button>
+          <button onclick="updateCalculatedResultPreview(true)" class="px-3.5 py-2 bg-blue-700 hover:bg-blue-800 text-white rounded-lg text-xs font-bold min-h-[42px] flex items-center gap-1.5 shadow-xs transition">
+            <i class="ph-bold ph-arrows-clockwise"></i> Calculate
+          </button>
+          <button onclick="applyFormulaFromAssistant()" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold min-h-[42px] flex items-center gap-1.5 shadow-sm transition">
+            <i class="ph-bold ph-check"></i> Apply Formula
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================================== -->
+    <!-- SPREADSHEET TOOLBAR, FORMULA BAR & GRID        -->
+    <!-- ============================================== -->
+    <div id="spreadsheet-card" class="bg-white rounded-lg border border-slate-300 shadow-sm overflow-hidden flex flex-col">
+      
+      <!-- SPREADSHEET ACTION TOOLBAR -->
+      <div class="p-2.5 bg-slate-50 border-b border-slate-300 flex flex-wrap items-center justify-between gap-2">
+        
+        <!-- Search & Filter Input -->
+        <div class="flex items-center gap-2 flex-1 min-w-[160px] max-w-xs">
+          <div class="relative w-full">
+            <i class="ph-bold ph-magnifying-glass absolute left-2.5 top-2.5 text-slate-400 text-xs"></i>
+            <input type="text" id="global-search" oninput="applyFilters()" placeholder="Search sheet..." 
+              class="w-full pl-8 pr-2.5 py-1.5 bg-white border border-slate-300 rounded text-xs focus:ring-1 focus:ring-blue-500 focus:outline-none" />
+          </div>
+          <span id="row-count-badge" class="text-[11px] font-semibold text-slate-500 whitespace-nowrap bg-slate-200 px-2 py-1 rounded">0 rows</span>
+        </div>
+
+        <!-- Spreadsheet Operations & Formula Trigger -->
+        <div class="flex flex-wrap items-center gap-1.5">
+          <!-- VISIBLE FORMULA ASSISTANT BUTTON (REQUIREMENT 1) -->
+          <button onclick="openFormulaAssistantPanel()" class="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold rounded text-xs flex items-center gap-1.5 shadow-xs transition" title="Open Formula Assistant & Builder">
+            <i class="ph-bold ph-calculator text-sm"></i> 🧮 Formula Assistant
+          </button>
+
+          <button onclick="spreadsheetEngine.addRow()" class="px-2.5 py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded text-xs font-semibold flex items-center gap-1 shadow-xs transition" title="Add empty row">
+            <i class="ph-bold ph-plus text-emerald-600"></i> Add Row
+          </button>
+          
+          <button onclick="spreadsheetEngine.deleteSelectedRows()" class="px-2.5 py-1.5 bg-white hover:bg-rose-50 text-rose-700 border border-rose-300 rounded text-xs font-semibold flex items-center gap-1 shadow-xs transition" title="Delete checked rows">
+            <i class="ph-bold ph-trash"></i> Delete
+          </button>
+
+          <button onclick="confirmResetTable()" class="px-2.5 py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded text-xs font-semibold flex items-center gap-1 shadow-xs transition" title="Reset table">
+            <i class="ph-bold ph-arrows-counter-clockwise text-blue-600"></i> Reset
+          </button>
+
+          <!-- EXPORT BUTTONS -->
+          <div class="h-4 border-l border-slate-300 mx-0.5"></div>
+
+          <button onclick="openExportPreview()" class="px-2.5 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-800 rounded text-xs font-semibold flex items-center gap-1 shadow-xs transition">
+            <i class="ph-bold ph-eye text-sm"></i> Preview
+          </button>
+
+          <button onclick="exportToExcel()" class="px-3 py-1.5 bg-blue-700 hover:bg-blue-800 text-white rounded text-xs font-semibold flex items-center gap-1 shadow-xs transition" title="Export genuine Microsoft Excel .xlsx with formatting and formulas">
+            <i class="ph-bold ph-file-xls text-sm text-emerald-300"></i> Download Excel (.xlsx)
+          </button>
+        </div>
+      </div>
+
+      <!-- MANUAL DATA ENTRY FEATURE -->
+      <section id="manual-entry-panel" class="mx-3 my-3 p-3 sm:p-4 bg-emerald-50 border border-emerald-200 rounded-xl">
+        <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+          <div>
+            <h3 class="font-bold text-emerald-950 text-base">✍️ Manual Data Entry</h3>
+            <p class="text-xs text-emerald-800 mt-1">Yahan khud data bharein. Add Entry dabane par data neeche Excel table mein jud jayega.</p>
+          </div>
+          <button type="button" onclick="toggleManualEntry()" id="manual-entry-toggle" class="px-3 py-2 bg-white border border-emerald-300 rounded-lg text-xs font-bold text-emerald-800">Hide Form</button>
+        </div>
+        <div id="manual-entry-fields" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3"></div>
+        <div id="manual-entry-status" class="text-xs text-emerald-800 mt-2" aria-live="polite"></div>
+        <div id="manual-entry-actions" class="flex flex-wrap gap-2 mt-3">
+          <button type="button" onclick="addManualEntry()" class="px-4 py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-sm font-bold">＋ Add Entry to Table</button>
+          <button type="button" onclick="clearManualEntryForm()" class="px-4 py-2.5 bg-white hover:bg-emerald-100 border border-emerald-300 text-emerald-900 rounded-lg text-sm font-semibold">Clear Form</button>
+          <button type="button" onclick="spreadsheetEngine.addRow(); document.getElementById('manual-entry-status').textContent='Blank row added. Tap its cells in the table to type.';" class="px-4 py-2.5 bg-white hover:bg-emerald-100 border border-emerald-300 text-emerald-900 rounded-lg text-sm font-semibold">＋ Add Blank Row</button>
+        </div>
+      </section>
+
+      <!-- FORMULA BAR (FX BAR) -->
+      <div class="px-3 py-1.5 bg-slate-100 border-b border-slate-300 flex items-center gap-2 text-xs">
+        <span class="font-bold text-slate-600 font-mono px-2 py-0.5 bg-white border border-slate-300 rounded" id="active-cell-ref">D2</span>
+        <span class="font-bold text-blue-700 font-serif italic text-sm select-none">fx</span>
+        <input type="text" id="formula-bar-input" oninput="handleFormulaBarInput(this.value)" placeholder="Enter a value or formula (e.g. =SUM(D2:D9), =B2*C2, =IF(D2>=100,'High','Low'))" 
+               class="flex-1 px-2.5 py-1 bg-white border border-slate-300 rounded font-mono text-xs font-medium text-slate-800 focus:ring-1 focus:ring-blue-500 focus:outline-none" />
+      </div>
+
+      <!-- INLINE FILTER DROPDOWN BAR -->
+      <div id="filter-bar" class="px-3 py-1 bg-blue-50/70 border-b border-blue-200 flex flex-wrap items-center gap-2 text-xs">
+        <span class="text-blue-900 font-semibold flex items-center gap-1"><i class="ph-bold ph-funnel"></i> Filter:</span>
+        <select id="filter-col-select" onchange="updateColumnFilterInput()" class="bg-white border border-blue-300 text-xs rounded px-2 py-0.5 text-slate-700"></select>
+        <input type="text" id="filter-val-input" oninput="applyFilters()" placeholder="Filter text..." 
+               class="bg-white border border-blue-300 text-xs rounded px-2 py-0.5 text-slate-700 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+        <button onclick="clearCurrentFilter()" class="text-blue-700 hover:text-blue-900 text-xs underline ml-1">Clear</button>
+        <span id="active-filter-indicator" class="text-[11px] text-blue-600 ml-auto font-medium"></span>
+      </div>
+
+      <!-- SPREADSHEET TABLE CONTAINER (MOBILE RESPONSIVE & BORDERED) -->
+      <div class="sheet-scroll-container">
+        <table id="main-excel-table" class="excel-table">
+          <thead>
+            <tr id="table-header-row"></tr>
+          </thead>
+          <tbody id="table-body"></tbody>
+        </table>
+      </div>
+
+      <!-- SPREADSHEET FOOTER -->
+      <div class="bg-slate-100 border-t border-slate-300 px-3 py-2 text-xs text-slate-600 flex flex-wrap items-center justify-between gap-2">
+        <span class="flex items-center gap-1">
+          <i class="ph-bold ph-cursor-click text-blue-600"></i> Tap any cell to set as Formula Target. Double-click column header to rename.
+        </span>
+        <div id="table-total-sum" class="font-bold text-slate-800 font-mono"></div>
+      </div>
+
+    </div>
+
+    <!-- RAW EXTRACTED TEXT ACCORDION -->
+    <details id="raw-text-accordion" class="bg-white rounded-lg border border-slate-300 p-3 text-xs text-slate-600">
+      <summary class="font-semibold text-slate-700 cursor-pointer hover:text-blue-700 flex items-center gap-1.5">
+        <i class="ph-bold ph-terminal-window"></i> View Raw OCR Extracted Text / Document Inspection
+      </summary>
+      <pre id="raw-text-content" class="mt-2 p-2.5 bg-slate-50 border border-slate-200 rounded font-mono text-[11px] whitespace-pre-wrap max-h-48 overflow-y-auto text-slate-800"></pre>
+    </details>
+
+
+    <!-- MANUAL INVOICE / BILL ENTRY -->
+    <section id="invoice-entry-panel" class="tab-content hidden bg-white rounded-xl border border-slate-200 shadow-sm p-4 space-y-3">
+      <div class="flex items-center justify-between gap-2 flex-wrap">
+        <div><h2 class="text-lg font-bold text-slate-900">🧾 Invoice / Bill Entry</h2><p class="text-sm text-slate-500">Item, quantity aur price bharein; total automatic calculate hoga.</p></div>
+        <button onclick="invoicePrintPdf()" class="bg-blue-700 hover:bg-blue-800 text-white font-bold rounded-lg px-4 py-2">Download Bill PDF</button>
+      </div>
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <label class="text-sm col-span-2">Shop Name<input id="inv-shop" class="mt-1 w-full border rounded-lg p-2" placeholder="Apni shop ka naam"></label>
+        <label class="text-sm">Bill No.<input id="inv-billno" class="mt-1 w-full border rounded-lg p-2" placeholder="INV-001"></label>
+        <label class="text-sm">Date<input id="inv-date" type="date" class="mt-1 w-full border rounded-lg p-2"></label>
+        <label class="text-sm col-span-2">Customer Name<input id="inv-customer" class="mt-1 w-full border rounded-lg p-2" placeholder="Customer name"></label>
+      </div>
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 items-end">
+        <label class="text-sm col-span-2">Item / Description<input id="inv-item" class="mt-1 w-full border rounded-lg p-2" placeholder="Item name"></label>
+        <label class="text-sm">Quantity<input id="inv-qty" type="number" min="0.01" step="any" value="1" class="mt-1 w-full border rounded-lg p-2"></label>
+        <label class="text-sm">Unit Price (₹)<input id="inv-price" type="number" min="0" step="0.01" class="mt-1 w-full border rounded-lg p-2" placeholder="0.00"></label>
+      </div>
+      <div class="flex gap-2 flex-wrap"><button onclick="invoiceAddItem()" class="bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg px-4 py-2 font-semibold">+ Add Item</button><button onclick="invoiceClearAll()" class="bg-slate-200 hover:bg-slate-300 text-slate-800 rounded-lg px-4 py-2">Clear Bill</button></div>
+      <div class="overflow-x-auto border rounded-lg"><table class="w-full text-sm" id="invoice-items-table"><thead class="bg-slate-100"><tr><th class="p-2 text-left">#</th><th class="p-2 text-left">Item</th><th class="p-2 text-right">Qty</th><th class="p-2 text-right">Price</th><th class="p-2 text-right">Amount</th><th class="p-2">Remove</th></tr></thead><tbody id="invoice-items-body"><tr><td colspan="6" class="p-4 text-center text-slate-500">Abhi koi item add nahi hua.</td></tr></tbody></table></div>
+      <div class="text-right text-xl font-bold text-slate-900">Total Amount: <span id="invoice-total">₹0.00</span></div>
+      <p class="text-xs text-slate-500">PDF ke liye button dabayein. Print screen khule to “Save as PDF” select karein.</p>
+      <div class="flex gap-2 flex-wrap border-t pt-3">
+        <button onclick="invoiceSaveToHistory()" class="bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg px-4 py-2 font-semibold">💾 Save Bill to History</button>
+        <button onclick="invoiceResetForNew()" class="bg-slate-700 hover:bg-slate-800 text-white rounded-lg px-4 py-2">New Bill</button>
+      </div>
+    </section>
+
+    <section class="tab-content hidden bg-white rounded-xl border border-slate-200 shadow-sm p-4 space-y-3" id="invoice-history-panel">
+      <h2 class="text-lg font-bold">🧾 Invoice History</h2><p class="text-sm text-slate-500">Saved bills isi browser ke local storage mein rahenge.</p>
+      <div class="overflow-x-auto border rounded-lg"><table class="w-full text-sm"><thead class="bg-slate-100"><tr><th class="p-2 text-left">Bill No.</th><th class="p-2 text-left">Date</th><th class="p-2 text-left">Customer</th><th class="p-2 text-left">Shop</th><th class="p-2 text-right">Total</th><th class="p-2">Actions</th></tr></thead><tbody id="invoice-history-body"><tr><td colspan="6" class="p-3 text-center">Abhi koi saved bill nahi.</td></tr></tbody></table></div>
+    </section>
+
+    <section class="tab-content hidden bg-white rounded-xl border border-slate-200 shadow-sm p-4 space-y-3" id="stock-panel">
+      <h2 class="text-lg font-bold">📦 Stock Management</h2><p class="text-sm text-slate-500">Item ka stock add karein; bill history save karne par matching stock automatically kam hoga.</p>
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-2"><label class="text-sm">Item Name<input id="stock-name" class="mt-1 w-full border rounded-lg p-2" placeholder="Item name"></label><label class="text-sm">Opening / Add Qty<input id="stock-qty" type="number" min="0" step="any" class="mt-1 w-full border rounded-lg p-2" placeholder="0"></label><label class="text-sm">Unit Price (₹)<input id="stock-price" type="number" min="0" step="any" class="mt-1 w-full border rounded-lg p-2" placeholder="0.00"></label><button onclick="stockAddOrUpdate()" class="bg-emerald-600 text-white rounded-lg px-3 py-2 self-end">Add / Update Stock</button></div>
+      <div class="overflow-x-auto border rounded-lg"><table class="w-full text-sm"><thead class="bg-slate-100"><tr><th class="p-2 text-left">Item</th><th class="p-2 text-right">Available Qty</th><th class="p-2 text-right">Unit Price</th><th class="p-2">Action</th></tr></thead><tbody id="stock-body"><tr><td colspan="4" class="p-3 text-center">Stock empty hai.</td></tr></tbody></table></div>
+    </section>
+
+    <section class="tab-content hidden bg-white rounded-xl border border-slate-200 shadow-sm p-4 space-y-3" id="backup-panel">
+      <h2 class="text-lg font-bold">🛡️ Automatic Backup</h2>
+      <p class="text-sm text-slate-600">Bills aur stock mein badlav hone par browser mein backup snapshot automatically save hota rahega. Phone/browser ka data clear ho jaaye to backup file se restore kar sakte hain.</p>
+      <div class="flex flex-wrap gap-2"><button onclick="downloadShopBackup()" class="bg-blue-700 text-white rounded-lg px-4 py-2">⬇️ Download Backup File</button><button onclick="document.getElementById('restore-backup-file').click()" class="bg-slate-700 text-white rounded-lg px-4 py-2">♻️ Restore Backup</button><input id="restore-backup-file" type="file" accept="application/json,.json" class="hidden" onchange="restoreShopBackup(event)"></div>
+      <p id="backup-status" class="text-xs text-emerald-700">Automatic browser backup ready.</p>
+      <div class="border-t pt-3 mt-3 space-y-2">
+        <h3 class="font-bold text-base">☁️ Firebase Cloud Save</h3>
+        <p class="text-xs text-slate-600">Firebase Console → Project settings → General → Your apps → SDK setup → Config se poora config JSON paste karein. Cloud save ke liye Authentication mein Anonymous sign-in enable aur Firestore database create karna zaroori hai.</p>
+        <textarea id="firebase-config-input" rows="5" class="w-full border rounded-lg p-2 text-xs font-mono" placeholder='{"apiKey":"...","authDomain":"...","projectId":"...","storageBucket":"...","messagingSenderId":"...","appId":"..."}'></textarea>
+        <div class="flex flex-wrap gap-2"><button onclick="connectFirebase()" class="bg-indigo-700 text-white rounded-lg px-4 py-2">🔗 Connect Firebase</button><button onclick="saveAllToFirebase()" class="bg-emerald-700 text-white rounded-lg px-4 py-2">☁️ Save to Cloud</button><button onclick="restoreAllFromFirebase()" class="bg-slate-700 text-white rounded-lg px-4 py-2">♻️ Restore from Cloud</button></div>
+        <p id="firebase-status" class="text-xs text-amber-800" aria-live="polite">Firebase abhi connect nahi hai. Config paste karke Connect dabayein.</p>
+      </div>
+    </section>
+
+    <section class="tab-content hidden bg-white rounded-xl border border-slate-200 shadow-sm p-4 space-y-3" id="profit-calculator-panel">
+      <h2 class="text-lg font-bold">💰 Profit Calculator</h2>
+      <p class="text-sm text-slate-600">Apni total sale aur maal ki purchase cost bharein. Calculator estimated profit aur profit margin dikhayega.</p>
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3"><label class="text-sm">Total Sales (₹)<input id="profit-sales" type="number" min="0" step="0.01" class="mt-1 w-full border rounded-lg p-2" placeholder="e.g. 10000" oninput="calculateProfit()"></label><label class="text-sm">Purchase Cost (₹)<input id="profit-cost" type="number" min="0" step="0.01" class="mt-1 w-full border rounded-lg p-2" placeholder="e.g. 7000" oninput="calculateProfit()"></label><label class="text-sm">Other Expenses (₹)<input id="profit-expenses" type="number" min="0" step="0.01" class="mt-1 w-full border rounded-lg p-2" placeholder="e.g. 500" oninput="calculateProfit()"></label></div>
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3"><div class="rounded-lg bg-emerald-50 p-3"><div class="text-sm text-slate-600">Net Profit / Loss</div><div id="profit-result" class="text-2xl font-bold">₹0.00</div></div><div class="rounded-lg bg-blue-50 p-3"><div class="text-sm text-slate-600">Profit Margin</div><div id="profit-margin" class="text-2xl font-bold">0%</div></div><div class="rounded-lg bg-amber-50 p-3"><div class="text-sm text-slate-600">Status</div><div id="profit-status" class="text-lg font-bold">Details bharein</div></div></div>
+      <button onclick="clearProfitCalculator()" class="bg-slate-200 text-slate-800 rounded-lg px-4 py-2">Clear Calculator</button>
+    </section>
+
+    <section class="tab-content hidden bg-white rounded-xl border border-slate-200 shadow-sm p-4 space-y-3" id="sales-report-panel">
+      <h2 class="text-lg font-bold">📊 Daily Sales Report</h2><div class="grid grid-cols-1 sm:grid-cols-3 gap-3"><div class="rounded-lg bg-blue-50 p-3"><div class="text-sm text-slate-600">Aaj ke Saved Bills</div><div id="sales-today-count" class="text-2xl font-bold">0</div></div><div class="rounded-lg bg-emerald-50 p-3"><div class="text-sm text-slate-600">Aaj ki Total Sales</div><div id="sales-today-total" class="text-2xl font-bold">₹0.00</div></div><div class="rounded-lg bg-amber-50 p-3"><div class="text-sm text-slate-600">All-time Sales</div><div id="sales-all-total" class="text-2xl font-bold">₹0.00</div></div></div><p class="text-xs text-slate-500">Sales total hai, profit nahi. Profit ke liye purchase cost bhi record karni hogi.</p><button onclick="salesExportCsv()" class="bg-green-700 text-white rounded-lg px-4 py-2">Download Sales CSV</button>
+    </section>
+
+  </main>
+
+  <!-- PREVIEW EXPORT DATA MODAL -->
+  <div id="export-preview-modal" class="hidden fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-5 z-50">
+    <div class="bg-white rounded-xl max-w-4xl w-full p-4 border border-slate-300 shadow-2xl flex flex-col max-h-[90vh] space-y-3">
+      <div class="flex items-center justify-between border-b pb-2">
+        <div>
+          <h3 class="text-sm font-bold text-slate-900 flex items-center gap-1.5">
+            <i class="ph-bold ph-table text-blue-700 text-lg"></i> Preview Export Data
+          </h3>
+          <p class="text-xs text-slate-500">Formulas and calculated results are verified before downloading.</p>
+        </div>
+        <button onclick="closeExportPreview()" class="text-slate-400 hover:text-slate-600 p-1 text-lg">
+          <i class="ph-bold ph-x"></i>
+        </button>
+      </div>
+
+      <div class="flex flex-wrap items-center gap-3 text-xs bg-slate-50 p-2 rounded border border-slate-200">
+        <span class="font-semibold text-slate-700">Columns: <span id="preview-col-count" class="text-blue-700 font-bold">0</span></span>
+        <span class="text-slate-300">&bull;</span>
+        <span class="font-semibold text-slate-700">Rows: <span id="preview-row-count" class="text-blue-700 font-bold">0</span></span>
+        <span class="text-slate-300">&bull;</span>
+        <span class="text-slate-500 text-[11px]">Real Excel formulas (<code class="font-mono">=...</code>) will be saved in workbook.</span>
+      </div>
+
+      <div class="flex-1 overflow-x-auto overflow-y-auto border border-slate-300 rounded max-h-[48vh] bg-white">
+        <table id="preview-excel-table" class="excel-table text-xs">
+          <thead>
+            <tr id="preview-table-header"></tr>
+          </thead>
+          <tbody id="preview-table-body"></tbody>
+        </table>
+      </div>
+
+      <div class="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-200">
+        <span class="text-[11px] text-slate-500">Tap Close or select download option.</span>
+        <div class="flex items-center gap-2">
+          <button onclick="closeExportPreview()" class="px-3 py-1.5 text-xs font-semibold rounded bg-slate-100 hover:bg-slate-200 text-slate-700">Close</button>
+          <button onclick="closeExportPreview(); exportToCSV();" class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-xs font-semibold flex items-center gap-1 shadow-xs">
+            <i class="ph-bold ph-file-csv"></i> Download CSV
+          </button>
+          <button onclick="closeExportPreview(); exportToExcel();" class="px-3.5 py-1.5 bg-blue-700 hover:bg-blue-800 text-white rounded text-xs font-semibold flex items-center gap-1 shadow-xs">
+            <i class="ph-bold ph-file-xls text-emerald-300"></i> Download Excel (.xlsx)
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CONFIRMATION MODAL -->
+  <div id="confirm-modal" class="hidden fixed inset-0 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+    <div class="bg-white rounded-xl max-w-sm w-full p-4 border border-slate-200 shadow-xl space-y-3">
+      <div class="flex items-center gap-2 text-amber-600 font-bold text-sm">
+        <i class="ph-bold ph-warning text-xl"></i>
+        <h3 id="modal-title">Please Confirm</h3>
+      </div>
+      <p id="modal-msg" class="text-xs text-slate-600">Are you sure you want to perform this action?</p>
+      <div class="flex justify-end gap-2 pt-2">
+        <button onclick="closeConfirmModal(false)" class="px-3 py-1.5 text-xs font-semibold rounded bg-slate-100 hover:bg-slate-200 text-slate-700">Cancel</button>
+        <button id="modal-ok-btn" onclick="closeConfirmModal(true)" class="px-3 py-1.5 text-xs font-semibold rounded bg-rose-600 hover:bg-rose-700 text-white shadow-xs">Yes, Proceed</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- JAVASCRIPT APPLICATION CODE -->
+  <script>
+    // Global State
+    let stagedFile = null;
+    let isProcessingCancelled = false;
+    let activeExcelBlobUrl = null;
+    let activeCsvBlobUrl = null;
+    let activeCellCoord = { row: 0, col: 3, colName: 'Amount' }; // Default D2
+
+    // ========================================================
+    // SAFE FORMULA EVALUATION ENGINE (NO EVAL)
+    // ========================================================
+    const FormulaEngine = {
+      // Cell index parser: A2 -> { col: 0, row: 0 } (Row 1 is header)
+      parseCellRef(ref) {
+        if (!ref) return null;
+        const m = String(ref).trim().toUpperCase().match(/^([A-Z]+)([0-9]+)$/);
+        if (!m) return null;
+        let col = 0;
+        for (let i = 0; i < m[1].length; i++) {
+          col = col * 26 + (m[1].charCodeAt(i) - 64);
+        }
+        return { col: col - 1, row: parseInt(m[2], 10) - 2 };
+      },
+
+      toCellRef(colIdx, rowIdx) {
+        let colLetter = String.fromCharCode(65 + (colIdx % 26));
+        return `${colLetter}${rowIdx + 2}`;
+      },
+
+      getCellValue(rows, columns, colIdx, rowIdx) {
+        if (!rows[rowIdx] || colIdx < 0 || colIdx >= columns.length) return 0;
+        const colName = columns[colIdx];
+        const raw = rows[rowIdx][colName];
+        if (typeof raw === 'string' && raw.startsWith('=')) {
+          return parseFloat(rows[rowIdx]['__calc_' + colName]) || 0;
+        }
+        const cleaned = String(raw || '').replace(/[^0-9.-]+/g, '');
+        return parseFloat(cleaned) || 0;
+      },
+
+      getCellString(rows, columns, colIdx, rowIdx) {
+        if (!rows[rowIdx] || colIdx < 0 || colIdx >= columns.length) return '';
+        const colName = columns[colIdx];
+        const raw = rows[rowIdx][colName];
+        if (typeof raw === 'string' && raw.startsWith('=')) {
+          return String(rows[rowIdx]['__calc_' + colName] !== undefined ? rows[rowIdx]['__calc_' + colName] : '');
+        }
+        return String(raw || '').trim();
+      },
+
+      expandRangeValues(rangeStr, rows, columns) {
+        const parts = rangeStr.split(':');
+        if (parts.length !== 2) return [];
+        const start = this.parseCellRef(parts[0]);
+        const end = this.parseCellRef(parts[1]);
+        if (!start || !end) return [];
+
+        const values = [];
+        const minRow = Math.min(start.row, end.row);
+        const maxRow = Math.max(start.row, end.row);
+        const minCol = Math.min(start.col, end.col);
+        const maxCol = Math.max(start.col, end.col);
+
+        for (let r = minRow; r <= maxRow; r++) {
+          for (let c = minCol; c <= maxCol; c++) {
+            values.push(this.getCellValue(rows, columns, c, r));
+          }
+        }
+        return values;
+      },
+
+      validateFormula(formulaStr) {
+        if (!formulaStr || !formulaStr.startsWith('=')) return { valid: false, error: "Formula must start with '='" };
+        const expr = formulaStr.substring(1).trim();
+        if (!expr) return { valid: false, error: "Empty formula expression" };
+        return { valid: true };
+      },
+
+      evalFormula(formulaStr, currentRowIdx, rows, columns) {
+        if (!formulaStr || !formulaStr.startsWith('=')) return formulaStr;
+        let expr = formulaStr.substring(1).trim();
+
+        try {
+          // 1. TODAY()
+          if (/^TODAY\(\)$/i.test(expr)) {
+            return new Date().toISOString().split('T')[0];
+          }
+
+          // 2. SUM(range)
+          const sumMatch = expr.match(/^SUM\(([^)]+)\)$/i);
+          if (sumMatch) {
+            const args = sumMatch[1];
+            if (args.includes(':')) {
+              const vals = this.expandRangeValues(args, rows, columns);
+              const total = vals.reduce((a, b) => a + b, 0);
+              return Math.round(total * 100) / 100;
+            } else {
+              // Comma separated e.g. SUM(B2, C2)
+              const parts = args.split(',');
+              const total = parts.reduce((acc, p) => acc + (parseFloat(this.resolveValue(p, currentRowIdx, rows, columns)) || 0), 0);
+              return Math.round(total * 100) / 100;
+            }
+          }
+
+          // 3. AVERAGE(range)
+          const avgMatch = expr.match(/^AVERAGE\(([^)]+)\)$/i);
+          if (avgMatch) {
+            const vals = this.expandRangeValues(avgMatch[1], rows, columns);
+            if (vals.length === 0) return 0;
+            const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+            return Math.round(avg * 100) / 100;
+          }
+
+          // 4. COUNT(range) / COUNTA(range)
+          const countMatch = expr.match(/^COUNT\(([^)]+)\)$/i);
+          if (countMatch) {
+            const vals = this.expandRangeValues(countMatch[1], rows, columns);
+            return vals.filter(v => v !== 0 && !isNaN(v)).length;
+          }
+          const countaMatch = expr.match(/^COUNTA\(([^)]+)\)$/i);
+          if (countaMatch) {
+            const parts = countaMatch[1].split(':');
+            const start = this.parseCellRef(parts[0]);
+            const end = this.parseCellRef(parts[1]);
+            if (start && end) {
+              let count = 0;
+              for (let r = Math.min(start.row, end.row); r <= Math.max(start.row, end.row); r++) {
+                for (let c = Math.min(start.col, end.col); c <= Math.max(start.col, end.col); c++) {
+                  if (this.getCellString(rows, columns, c, r) !== '') count++;
+                }
+              }
+              return count;
+            }
+          }
+
+          // 5. MAX / MIN
+          const maxMatch = expr.match(/^MAX\(([^)]+)\)$/i);
+          if (maxMatch) {
+            const vals = this.expandRangeValues(maxMatch[1], rows, columns);
+            return vals.length ? Math.max(...vals) : 0;
+          }
+          const minMatch = expr.match(/^MIN\(([^)]+)\)$/i);
+          if (minMatch) {
+            const vals = this.expandRangeValues(minMatch[1], rows, columns);
+            return vals.length ? Math.min(...vals) : 0;
+          }
+
+          // 6. ROUND(expr, decimals)
+          const roundMatch = expr.match(/^ROUND\((.+),\s*(\d+)\)$/i);
+          if (roundMatch) {
+            const val = parseFloat(this.evalFormula('=' + roundMatch[1], currentRowIdx, rows, columns)) || 0;
+            const dec = parseInt(roundMatch[2], 10);
+            return Math.round(val * Math.pow(10, dec)) / Math.pow(10, dec);
+          }
+
+          // 7. IF(condition, trueVal, falseVal) e.g. =IF(D2>=100,"High","Low")
+          const ifMatch = expr.match(/^IF\(\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^)]+)\s*\)$/i);
+          if (ifMatch) {
+            const condStr = ifMatch[1].trim();
+            const trueVal = ifMatch[2].trim().replace(/^["']|["']$/g, '');
+            const falseVal = ifMatch[3].trim().replace(/^["']|["']$/g, '');
+            
+            let condResult = false;
+            if (condStr.includes('>=')) {
+              const [left, right] = condStr.split('>=');
+              condResult = this.resolveValue(left, currentRowIdx, rows, columns) >= this.resolveValue(right, currentRowIdx, rows, columns);
+            } else if (condStr.includes('<=')) {
+              const [left, right] = condStr.split('<=');
+              condResult = this.resolveValue(left, currentRowIdx, rows, columns) <= this.resolveValue(right, currentRowIdx, rows, columns);
+            } else if (condStr.includes('<>')) {
+              const [left, right] = condStr.split('<>');
+              condResult = this.resolveValue(left, currentRowIdx, rows, columns) != this.resolveValue(right, currentRowIdx, rows, columns);
+            } else if (condStr.includes('>')) {
+              const [left, right] = condStr.split('>');
+              condResult = this.resolveValue(left, currentRowIdx, rows, columns) > this.resolveValue(right, currentRowIdx, rows, columns);
+            } else if (condStr.includes('<')) {
+              const [left, right] = condStr.split('<');
+              condResult = this.resolveValue(left, currentRowIdx, rows, columns) < this.resolveValue(right, currentRowIdx, rows, columns);
+            } else if (condStr.includes('=')) {
+              const [left, right] = condStr.split('=');
+              const leftV = this.resolveValue(left, currentRowIdx, rows, columns);
+              const rightV = this.resolveValue(right, currentRowIdx, rows, columns);
+              condResult = String(leftV).toLowerCase() == String(rightV).toLowerCase();
+            }
+            return condResult ? trueVal : falseVal;
+          }
+
+          // 8. COUNTIF(range, criteria)
+          const countifMatch = expr.match(/^COUNTIF\(\s*([^,]+)\s*,\s*([^)]+)\s*\)$/i);
+          if (countifMatch) {
+            const rangeStr = countifMatch[1].trim();
+            const target = countifMatch[2].trim().replace(/^["']|["']$/g, '').toLowerCase();
+            const parts = rangeStr.split(':');
+            const start = this.parseCellRef(parts[0]);
+            const end = this.parseCellRef(parts[1]);
+            let count = 0;
+            if (start && end) {
+              for (let r = Math.min(start.row, end.row); r <= Math.max(start.row, end.row); r++) {
+                for (let c = Math.min(start.col, end.col); c <= Math.max(start.col, end.col); c++) {
+                  if (this.getCellString(rows, columns, c, r).toLowerCase().includes(target)) count++;
+                }
+              }
+            }
+            return count;
+          }
+
+          // 9. SUMIF(range, criteria, [sum_range])
+          const sumifMatch = expr.match(/^SUMIF\(\s*([^,]+)\s*,\s*([^,]+)\s*(?:,\s*([^)]+)\s*)?\)$/i);
+          if (sumifMatch) {
+            const critRange = sumifMatch[1].trim().split(':');
+            const crit = sumifMatch[2].trim().replace(/^["']|["']$/g, '').toLowerCase();
+            const sumRange = sumifMatch[3] ? sumifMatch[3].trim().split(':') : critRange;
+            const cStart = this.parseCellRef(critRange[0]);
+            const cEnd = this.parseCellRef(critRange[1]);
+            const sStart = this.parseCellRef(sumRange[0]);
+            const sEnd = this.parseCellRef(sumRange[1]);
+            let sum = 0;
+            if (cStart && cEnd && sStart && sEnd) {
+              const rCount = Math.abs(cEnd.row - cStart.row) + 1;
+              for (let i = 0; i < rCount; i++) {
+                const critCell = this.getCellString(rows, columns, cStart.col, cStart.row + i).toLowerCase();
+                if (critCell.includes(crit)) {
+                  sum += this.getCellValue(rows, columns, sStart.col, sStart.row + i);
+                }
+              }
+            }
+            return Math.round(sum * 100) / 100;
+          }
+
+          // 10. Arithmetic (e.g. =B2*C2, =D2*0.18, =(B2/C2)*100, =D2+D3)
+          return this.evalArithmetic(expr, currentRowIdx, rows, columns);
+
+        } catch (e) {
+          console.error("Formula Eval Error:", e);
+          return "#ERROR: " + (e.message || "SYNTAX");
+        }
+      },
+
+      resolveValue(token, currentRowIdx, rows, columns) {
+        token = String(token).trim();
+        const cellRef = this.parseCellRef(token);
+        if (cellRef) {
+          return this.getCellValue(rows, columns, cellRef.col, cellRef.row);
+        }
+        return parseFloat(token.replace(/[^0-9.-]+/g, '')) || 0;
+      },
+
+      evalArithmetic(expr, currentRowIdx, rows, columns) {
+        // Safe tokenizer without eval()
+        const tokens = expr.match(/([A-Z]+[0-9]+|[0-9.]+|[+\-*\/()])/gi);
+        if (!tokens) return 0;
+
+        const resolvedTokens = tokens.map(tok => {
+          if (/^[A-Z]+[0-9]+$/i.test(tok)) {
+            const ref = this.parseCellRef(tok);
+            return ref ? this.getCellValue(rows, columns, ref.col, ref.row) : 0;
+          }
+          return tok;
+        });
+
+        // Pass 1: Handle * and /
+        const collapsed = [];
+        let i = 0;
+        while (i < resolvedTokens.length) {
+          const t = resolvedTokens[i];
+          if (t === '*' || t === '/') {
+            const prev = parseFloat(collapsed.pop()) || 0;
+            const next = parseFloat(resolvedTokens[i + 1]) || 0;
+            const res = (t === '*') ? (prev * next) : (next !== 0 ? prev / next : 0);
+            collapsed.push(res);
+            i += 2;
+          } else {
+            collapsed.push(t);
+            i++;
+          }
+        }
+
+        // Pass 2: Handle + and -
+        let finalVal = 0;
+        let op = '+';
+        collapsed.forEach(item => {
+          if (item === '+' || item === '-') {
+            op = item;
+          } else {
+            const n = parseFloat(item) || 0;
+            finalVal = (op === '+') ? (finalVal + n) : (finalVal - n);
+          }
+        });
+
+        return Math.round(finalVal * 100) / 100;
+      }
+    };
+
+    // ========================================================
+    // SPREADSHEET ENGINE
+    // ========================================================
+    const spreadsheetEngine = {
+      columns: [],
+      rows: [],
+      initialBackup: [],
+      selectedRows: new Set(),
+      sortConfig: { col: null, direction: 'asc' },
+      filterCol: null,
+      filterVal: '',
+      globalQuery: '',
+
+      init(columns, rows) {
+        this.columns = columns;
+        this.rows = JSON.parse(JSON.stringify(rows));
+        this.initialBackup = JSON.parse(JSON.stringify(rows));
+        this.selectedRows.clear();
+        this.sortConfig = { col: null, direction: 'asc' };
+        this.filterCol = this.columns[0] || null;
+        this.filterVal = '';
+        this.globalQuery = '';
+        this.recalculateAll();
+        populateFilterDropdown();
+        this.render();
+        populateFormulaAssistantControls();
+        renderManualEntryForm();
+      },
+
+      recalculateAll() {
+        this.rows.forEach((row, rIdx) => {
+          this.columns.forEach(col => {
+            const val = row[col];
+            if (typeof val === 'string' && val.startsWith('=')) {
+              row['__calc_' + col] = FormulaEngine.evalFormula(val, rIdx, this.rows, this.columns);
+            }
+          });
+        });
+      },
+
+      addRow() {
+        const newRow = {};
+        this.columns.forEach(col => newRow[col] = "");
+        this.rows.push(newRow);
+        this.recalculateAll();
+        this.render();
+        populateFormulaAssistantControls();
+      },
+
+      deleteSelectedRows() {
+        if (this.selectedRows.size === 0) {
+          showError("Please check at least one row checkbox to delete.");
+          return;
+        }
+        const sortedIndices = Array.from(this.selectedRows).sort((a, b) => b - a);
+        sortedIndices.forEach(idx => {
+          if (idx >= 0 && idx < this.rows.length) {
+            this.rows.splice(idx, 1);
+          }
+        });
+        this.selectedRows.clear();
+        this.recalculateAll();
+        this.render();
+        populateFormulaAssistantControls();
+      },
+
+      addColumn(newColName) {
+        if (!newColName) return;
+        const col = newColName.trim();
+        if (this.columns.includes(col)) {
+          showError(`Column "${col}" already exists.`);
+          return;
+        }
+        this.columns.push(col);
+        this.rows.forEach(r => r[col] = "");
+        populateFilterDropdown();
+        this.render();
+        populateFormulaAssistantControls();
+      },
+
+      renameColumn(oldName, newName) {
+        newName = newName.trim();
+        if (!newName || oldName === newName) return;
+        const idx = this.columns.indexOf(oldName);
+        if (idx === -1) return;
+        this.columns[idx] = newName;
+        this.rows.forEach(r => {
+          r[newName] = r[oldName];
+          delete r[oldName];
+        });
+        populateFilterDropdown();
+        this.render();
+        populateFormulaAssistantControls();
+      },
+
+      deleteColumn(colName) {
+        if (this.columns.length <= 1) {
+          showError("Spreadsheet must have at least one column.");
+          return;
+        }
+        this.columns = this.columns.filter(c => c !== colName);
+        this.rows.forEach(r => delete r[colName]);
+        populateFilterDropdown();
+        this.render();
+        populateFormulaAssistantControls();
+      },
+
+      updateCell(rowIndex, colName, value) {
+        if (this.rows[rowIndex]) {
+          this.rows[rowIndex][colName] = value.trim();
+          this.recalculateAll();
+          updateSummaryTotal();
+        }
+      },
+
+      getFilteredRows() {
+        return this.rows.map((row, originalIndex) => ({ row, originalIndex })).filter(({ row }) => {
+          if (this.globalQuery) {
+            const query = this.globalQuery.toLowerCase();
+            const matchesGlobal = Object.values(row).some(val => 
+              String(val || '').toLowerCase().includes(query)
+            );
+            if (!matchesGlobal) return false;
+          }
+
+          if (this.filterCol && this.filterVal) {
+            const cellVal = String(row[this.filterCol] || '').toLowerCase();
+            if (!cellVal.includes(this.filterVal.toLowerCase())) {
+              return false;
+            }
+          }
+
+          return true;
+        });
+      },
+
+      sort(colName) {
+        if (this.sortConfig.col === colName) {
+          this.sortConfig.direction = this.sortConfig.direction === 'asc' ? 'desc' : 'asc';
+        } else {
+          this.sortConfig.col = colName;
+          this.sortConfig.direction = 'asc';
+        }
+
+        const dir = this.sortConfig.direction === 'asc' ? 1 : -1;
+        this.rows.sort((a, b) => {
+          let vA = (a[colName] || "").toString().trim();
+          let vB = (b[colName] || "").toString().trim();
+          
+          const nA = parseFloat(vA.replace(/[^0-9.-]+/g, ""));
+          const nB = parseFloat(vB.replace(/[^0-9.-]+/g, ""));
+          if (!isNaN(nA) && !isNaN(nB)) {
+            return (nA - nB) * dir;
+          }
+          return vA.localeCompare(vB) * dir;
+        });
+
+        this.render();
+      },
+
+      render() {
+        const thead = document.getElementById('table-header-row');
+        const tbody = document.getElementById('table-body');
+        
+        thead.innerHTML = `
+          <th class="row-idx" style="width:40px;">
+            <input type="checkbox" id="select-all-checkbox" onchange="toggleSelectAll(this)" title="Select All" class="rounded text-blue-600 focus:ring-0 cursor-pointer">
+          </th>
+          <th class="row-idx" style="width:44px;">#</th>
+        `;
+
+        this.columns.forEach((col, idx) => {
+          const colLetter = String.fromCharCode(65 + (idx % 26));
+          const isSorted = this.sortConfig.col === col;
+          const sortIcon = isSorted ? (this.sortConfig.direction === 'asc' ? '▲' : '▼') : '⇅';
+          
+          const th = document.createElement('th');
+          th.className = "select-none hover:bg-blue-900 transition";
+          th.innerHTML = `
+            <div class="flex items-center justify-between gap-1.5 px-1">
+              <span class="flex items-center gap-1 cursor-pointer" onclick="spreadsheetEngine.sort('${escapeHTML(col)}')">
+                <span class="text-[10px] opacity-75 font-mono mr-0.5">${colLetter}</span>
+                <span ondblclick="event.stopPropagation(); promptRenameColumn('${escapeHTML(col)}')">${escapeHTML(col)}</span>
+              </span>
+              <div class="flex items-center gap-1">
+                <span class="text-[10px] opacity-80 cursor-pointer" onclick="spreadsheetEngine.sort('${escapeHTML(col)}')">${sortIcon}</span>
+                <button onclick="event.stopPropagation(); spreadsheetEngine.deleteColumn('${escapeHTML(col)}')" class="text-blue-300 hover:text-white" title="Delete Column">
+                  <i class="ph-bold ph-x text-[10px]"></i>
+                </button>
+              </div>
+            </div>
+          `;
+          thead.appendChild(th);
+        });
+
+        const visibleRows = this.getFilteredRows();
+        tbody.innerHTML = '';
+
+        if (visibleRows.length === 0) {
+          tbody.innerHTML = `
+            <tr>
+              <td colspan="${this.columns.length + 2}" class="text-center py-6 text-slate-400 bg-white">
+                No records available. Upload a file or tap "Load Invoice (Qty×Price)" to test.
+              </td>
+            </tr>
+          `;
+        } else {
+          visibleRows.forEach(({ row, originalIndex }, displayIndex) => {
+            const tr = document.createElement('tr');
+            const isChecked = this.selectedRows.has(originalIndex);
+
+            let cellsHTML = `
+              <td class="row-idx">
+                <input type="checkbox" ${isChecked ? 'checked' : ''} onchange="toggleRowSelection(${originalIndex}, this)" class="rounded text-blue-600 focus:ring-0 cursor-pointer">
+              </td>
+              <td class="row-idx font-mono text-[11px]">${displayIndex + 1}</td>
+            `;
+
+            this.columns.forEach((col, cIdx) => {
+              const rawVal = row[col] !== undefined ? row[col] : '';
+              const isFormula = typeof rawVal === 'string' && rawVal.startsWith('=');
+              const displayVal = isFormula ? (row['__calc_' + col] !== undefined ? row['__calc_' + col] : FormulaEngine.evalFormula(rawVal, originalIndex, this.rows, this.columns)) : rawVal;
+              
+              const isPhone = /phone|mobile|tel|contact/i.test(col);
+              const isNumeric = typeof displayVal === 'number' || (!isNaN(displayVal) && displayVal !== '' && !isPhone);
+              const alignClass = isNumeric ? 'text-right' : 'text-left';
+
+              cellsHTML += `
+                <td contenteditable="true" 
+                    class="${alignClass} ${isFormula ? 'font-mono text-blue-900 bg-blue-50/25 font-semibold' : ''}"
+                    onfocus="handleCellFocused(${originalIndex}, ${cIdx}, '${escapeHTML(col)}')"
+                    onblur="handleCellBlurred(${originalIndex}, '${escapeHTML(col)}', this.innerText)"
+                    spellcheck="false">${escapeHTML(String(displayVal))}</td>
+              `;
+            });
+
+            tr.innerHTML = cellsHTML;
+            tbody.appendChild(tr);
+          });
+        }
+
+        document.getElementById('row-count-badge').textContent = `${visibleRows.length} of ${this.rows.length} rows`;
+        updateSummaryTotal();
+      }
+    };
+
+    // Persist spreadsheet data on this device whenever the table is rendered/changed.
+    const __originalSpreadsheetRender = spreadsheetEngine.render.bind(spreadsheetEngine);
+    spreadsheetEngine.render = function(...args) {
+      const result = __originalSpreadsheetRender(...args);
+      try {
+        if (this.columns.length) localStorage.setItem('aiDataEntryPro_spreadsheet_v1', JSON.stringify({columns:this.columns,rows:this.rows,initialBackup:this.initialBackup,savedAt:new Date().toISOString()}));
+      } catch(e) { console.warn('Spreadsheet local save failed',e); }
+      return result;
+    };
+    window.spreadsheetEngine = spreadsheetEngine;
+
+    // Manual Data Entry: build one input for every current spreadsheet column.
+    function renderManualEntryForm() {
+      const wrap = document.getElementById('manual-entry-fields');
+      if (!wrap) return;
+      wrap.innerHTML = '';
+      spreadsheetEngine.columns.forEach((col, idx) => {
+        const field = document.createElement('label');
+        field.className = 'block text-xs font-semibold text-slate-700';
+        const title = document.createElement('span');
+        title.className = 'block mb-1';
+        title.textContent = col;
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.id = 'manual-entry-field-' + idx;
+        input.dataset.column = col;
+        input.placeholder = 'Enter ' + col;
+        input.autocomplete = 'off';
+        input.className = 'w-full min-h-[42px] px-3 py-2 border border-emerald-200 rounded-lg bg-white text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500';
+        input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addManualEntry(); } });
+        field.append(title, input);
+        wrap.appendChild(field);
+      });
+    }
+
+    function addManualEntry() {
+      if (!spreadsheetEngine.columns.length) {
+        document.getElementById('manual-entry-status').textContent = 'Pehle spreadsheet ke columns load karein.';
+        return;
+      }
+      const newRow = {};
+      let hasValue = false;
+      spreadsheetEngine.columns.forEach((col, idx) => {
+        const input = document.getElementById('manual-entry-field-' + idx);
+        const value = input ? input.value.trim() : '';
+        newRow[col] = value;
+        if (value !== '') hasValue = true;
+      });
+      if (!hasValue) {
+        document.getElementById('manual-entry-status').textContent = 'Pehle kam se kam ek field mein data bharein.';
+        return;
+      }
+      spreadsheetEngine.rows.push(newRow);
+      spreadsheetEngine.recalculateAll();
+      spreadsheetEngine.render();
+      populateFormulaAssistantControls();
+      document.getElementById('manual-entry-status').textContent = '✓ Data table mein add ho gaya. Ab Excel/CSV download kar sakte hain.';
+      clearManualEntryForm(false);
+      const first = document.getElementById('manual-entry-field-0');
+      if (first) first.focus();
+    }
+
+    function clearManualEntryForm(clearStatus = true) {
+      document.querySelectorAll('#manual-entry-fields input').forEach(input => input.value = '');
+      if (clearStatus) document.getElementById('manual-entry-status').textContent = '';
+    }
+
+    function toggleManualEntry() {
+      const fields = document.getElementById('manual-entry-fields');
+      const actions = document.getElementById('manual-entry-actions');
+      const hidden = fields.classList.toggle('hidden');
+      actions.classList.toggle('hidden', hidden);
+      document.getElementById('manual-entry-toggle').textContent = hidden ? 'Show Form' : 'Hide Form';
+    }
+
+    // Cell Focus & Synchronizer
+    function handleCellFocused(rowIdx, colIdx, colName) {
+      activeCellCoord = { row: rowIdx, col: colIdx, colName };
+      const cellRef = FormulaEngine.toCellRef(colIdx, rowIdx);
+      document.getElementById('active-cell-ref').textContent = cellRef;
+      
+      const rawVal = spreadsheetEngine.rows[rowIdx][colName] || '';
+      document.getElementById('formula-bar-input').value = rawVal;
+
+      // Sync into Formula Assistant Target Cell input if open
+      document.getElementById('fa-target-cell-input').value = cellRef;
+      document.getElementById('fa-target-cell-dropdown').value = cellRef;
+      updateFormulaPreview();
+    }
+
+    function handleCellBlurred(rowIdx, colName, textVal) {
+      spreadsheetEngine.updateCell(rowIdx, colName, textVal);
+    }
+
+    function handleFormulaBarInput(newVal) {
+      const { row, colName } = activeCellCoord;
+      if (spreadsheetEngine.rows[row] && colName) {
+        spreadsheetEngine.updateCell(row, colName, newVal);
+        spreadsheetEngine.render();
+      }
+    }
+
+    // ========================================================
+    // FEATURE 1 & 2: FULLY FUNCTIONAL FORMULA ASSISTANT
+    // ========================================================
+    function openFormulaAssistantPanel() {
+      const panel = document.getElementById('formula-assistant-panel');
+      panel.classList.remove('hidden');
+      populateFormulaAssistantControls();
+      panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
+    function closeFormulaAssistantPanel() {
+      document.getElementById('formula-assistant-panel').classList.add('hidden');
+    }
+
+    function populateFormulaAssistantControls() {
+      const cols = spreadsheetEngine.columns;
+      const rows = spreadsheetEngine.rows;
+      if (!cols.length) return;
+
+      // 1. Populate Target Cell Dropdown
+      const targetDropdown = document.getElementById('fa-target-cell-dropdown');
+      targetDropdown.innerHTML = '';
+
+      // Default Active Cell
+      const activeRef = FormulaEngine.toCellRef(activeCellCoord.col || 0, activeCellCoord.row || 0);
+      const activeOpt = document.createElement('option');
+      activeOpt.value = activeRef;
+      activeOpt.textContent = `Current Active Cell: ${activeRef}`;
+      targetDropdown.appendChild(activeOpt);
+
+      // Append as New Total Row Option
+      const newRowRef = FormulaEngine.toCellRef(cols.length - 1, rows.length);
+      const appendOpt = document.createElement('option');
+      appendOpt.value = `APPEND_TOTAL`;
+      appendOpt.textContent = `+ Append New Total Row at Bottom`;
+      targetDropdown.appendChild(appendOpt);
+
+      // Add common column targets
+      cols.forEach((col, cIdx) => {
+        const colLetter = String.fromCharCode(65 + (cIdx % 26));
+        const opt = document.createElement('option');
+        opt.value = `${colLetter}2`;
+        opt.textContent = `${colLetter}2 (${col} - Row 1)`;
+        targetDropdown.appendChild(opt);
+      });
+
+      // Target Cell Input
+      const targetInput = document.getElementById('fa-target-cell-input');
+      if (!targetInput.value) {
+        targetInput.value = activeRef;
+      }
+
+      // 2. Populate Data Range Dropdown
+      const rangeDropdown = document.getElementById('fa-data-range-dropdown');
+      rangeDropdown.innerHTML = '';
+      
+      const numRows = Math.max(rows.length, 1);
+      cols.forEach((col, cIdx) => {
+        const colLetter = String.fromCharCode(65 + (cIdx % 26));
+        const rangeStr = `${colLetter}2:${colLetter}${numRows + 1}`;
+        const opt = document.createElement('option');
+        opt.value = rangeStr;
+        opt.textContent = `Column ${colLetter}: ${rangeStr} (${col})`;
+        rangeDropdown.appendChild(opt);
+      });
+
+      const customRangeOpt = document.createElement('option');
+      customRangeOpt.value = "CUSTOM";
+      customRangeOpt.textContent = "Custom Range...";
+      rangeDropdown.appendChild(customRangeOpt);
+
+      const rangeInput = document.getElementById('fa-data-range-input');
+      if (!rangeInput.value) {
+        const defaultAmtCol = cols.find(c => /amount|salary|total|price/i.test(c)) || cols[cols.length - 1];
+        const defaultIdx = cols.indexOf(defaultAmtCol);
+        const defaultLetter = String.fromCharCode(65 + (defaultIdx % 26));
+        rangeInput.value = `${defaultLetter}2:${defaultLetter}${numRows + 1}`;
+      }
+
+      handleFormulaSelectionChange();
+    }
+
+    function syncTargetCellFromDropdown() {
+      const dropdown = document.getElementById('fa-target-cell-dropdown');
+      const input = document.getElementById('fa-target-cell-input');
+      if (dropdown.value === 'APPEND_TOTAL') {
+        const cols = spreadsheetEngine.columns;
+        const rows = spreadsheetEngine.rows;
+        const totalCol = cols.find(c => /amount|salary|total/i.test(c)) || cols[cols.length - 1];
+        const colIdx = cols.indexOf(totalCol);
+        const cellRef = FormulaEngine.toCellRef(colIdx, rows.length);
+        input.value = cellRef;
+      } else {
+        input.value = dropdown.value;
+      }
+      updateFormulaPreview();
+    }
+
+    function syncDataRangeFromDropdown() {
+      const dropdown = document.getElementById('fa-data-range-dropdown');
+      const input = document.getElementById('fa-data-range-input');
+      if (dropdown.value !== 'CUSTOM') {
+        input.value = dropdown.value;
+      }
+      updateFormulaPreview();
+    }
+
+    function handleFormulaSelectionChange() {
+      const formula = document.getElementById('fa-formula-select').value;
+      const batchWrapper = document.getElementById('fa-batch-row-wrapper');
+      
+      // If line item multiplier (Qty x Price), offer batch apply
+      if (formula === 'QTY_PRICE') {
+        batchWrapper.classList.remove('hidden');
+      } else {
+        batchWrapper.classList.add('hidden');
+      }
+
+      updateFormulaPreview();
+    }
+
+    function updateFormulaPreview() {
+      const formulaType = document.getElementById('fa-formula-select').value;
+      const targetCell = (document.getElementById('fa-target-cell-input').value || 'D2').trim().toUpperCase();
+      const range = (document.getElementById('fa-data-range-input').value || 'D2:D9').trim().toUpperCase();
+      const formulaInput = document.getElementById('fa-formula-input');
+      const cols = spreadsheetEngine.columns;
+
+      let generated = "";
+
+      switch (formulaType) {
+        case 'SUM':
+          generated = `=SUM(${range})`;
+          break;
+        case 'AVERAGE':
+          generated = `=AVERAGE(${range})`;
+          break;
+        case 'COUNT':
+          generated = `=COUNT(${range})`;
+          break;
+        case 'COUNTA':
+          generated = `=COUNTA(${range})`;
+          break;
+        case 'MAX':
+          generated = `=MAX(${range})`;
+          break;
+        case 'MIN':
+          generated = `=MIN(${range})`;
+          break;
+        case 'ROUND':
+          generated = `=ROUND(${range.split(':')[0] || 'D2'}*0.18, 2)`;
+          break;
+        case 'QTY_PRICE': {
+          // Detect Quantity and Unit Price columns
+          const qtyCol = cols.find(c => /quantity|qty/i.test(c)) || 'B';
+          const priceCol = cols.find(c => /unit\s*price|rate|price/i.test(c)) || 'C';
+          const qIdx = cols.indexOf(qtyCol) !== -1 ? cols.indexOf(qtyCol) : 1;
+          const pIdx = cols.indexOf(priceCol) !== -1 ? cols.indexOf(priceCol) : 2;
+          const qLetter = String.fromCharCode(65 + (qIdx % 26));
+          const pLetter = String.fromCharCode(65 + (pIdx % 26));
+          const parsed = FormulaEngine.parseCellRef(targetCell);
+          const rowNum = parsed ? parsed.row + 2 : 2;
+          generated = `=${qLetter}${rowNum}*${pLetter}${rowNum}`;
+          break;
+        }
+        case 'SUBTOTAL':
+          generated = `=SUM(${range})`;
+          break;
+        case 'GST': {
+          const firstCell = range.split(':')[0] || 'D2';
+          generated = `=ROUND(${firstCell}*0.18, 2)`;
+          break;
+        }
+        case 'GRAND_TOTAL': {
+          const parsed = FormulaEngine.parseCellRef(targetCell);
+          const rowNum = parsed ? parsed.row + 2 : 2;
+          generated = `=SUM(D${rowNum}:E${rowNum})`;
+          break;
+        }
+        case 'PERCENT': {
+          const parsed = FormulaEngine.parseCellRef(targetCell);
+          const rowNum = parsed ? parsed.row + 2 : 2;
+          generated = `=(B${rowNum}/C${rowNum})*100`;
+          break;
+        }
+        case 'IF': {
+          const firstCell = range.split(':')[0] || 'D2';
+          generated = `=IF(${firstCell}>=100,"High","Low")`;
+          break;
+        }
+        case 'SUMIF':
+          generated = `=SUMIF(C2:C${spreadsheetEngine.rows.length + 1},"Sales",D2:D${spreadsheetEngine.rows.length + 1})`;
+          break;
+        case 'COUNTIF':
+          generated = `=COUNTIF(${range},"Surat")`;
+          break;
+        case 'CUSTOM':
+          if (!formulaInput.value.startsWith('=')) {
+            generated = `=SUM(${range})`;
+          } else {
+            generated = formulaInput.value;
+          }
+          break;
+        default:
+          generated = `=SUM(${range})`;
+      }
+
+      formulaInput.value = generated;
+      updateCalculatedResultPreview();
+    }
+
+    function updateCalculatedResultPreview(showMessage = false) {
+      const formula = document.getElementById('fa-formula-input').value.trim();
+      const previewBox = document.getElementById('fa-calc-preview');
+      const targetCell = (document.getElementById('fa-target-cell-input').value || 'D2').trim().toUpperCase();
+      const parsed = FormulaEngine.parseCellRef(targetCell);
+      const rowIdx = parsed ? parsed.row : 0;
+
+      const validation = FormulaEngine.validateFormula(formula);
+      if (!validation.valid) {
+        previewBox.textContent = validation.error;
+        previewBox.className = "font-mono font-bold text-xs text-rose-600 truncate";
+        if (showMessage) showError(validation.error);
+        return;
+      }
+
+      const result = FormulaEngine.evalFormula(formula, rowIdx, spreadsheetEngine.rows, spreadsheetEngine.columns);
+      previewBox.textContent = (result !== undefined && result !== null) ? String(result) : "0.00";
+      
+      if (String(result).startsWith('#ERROR')) {
+        previewBox.className = "font-mono font-bold text-xs text-rose-600 truncate";
+        if (showMessage) showError("Formula Calculation Error: " + result);
+      } else {
+        previewBox.className = "font-mono font-bold text-sm text-emerald-700 truncate";
+        if (showMessage) showError(`Calculated value: ${result}`);
+      }
+    }
+
+    function applyFormulaFromAssistant() {
+      hideError();
+      const formula = document.getElementById('fa-formula-input').value.trim();
+      const targetRef = document.getElementById('fa-target-cell-input').value.trim().toUpperCase();
+      const formulaType = document.getElementById('fa-formula-select').value;
+      const applyAll = document.getElementById('fa-apply-all-rows').checked;
+
+      const validation = FormulaEngine.validateFormula(formula);
+      if (!validation.valid) {
+        showError(validation.error);
+        return;
+      }
+
+      const parsedTarget = FormulaEngine.parseCellRef(targetRef);
+      if (!parsedTarget) {
+        showError("Invalid Target Cell reference. Example valid format: D2, D10, G8.");
+        return;
+      }
+
+      const cols = spreadsheetEngine.columns;
+      if (parsedTarget.col >= cols.length) {
+        showError(`Target column is out of range. Table has ${cols.length} columns.`);
+        return;
+      }
+
+      // If target row exceeds current table size (e.g., target D10 in an 8-row table), append rows
+      while (parsedTarget.row >= spreadsheetEngine.rows.length) {
+        const newRow = {};
+        cols.forEach(c => newRow[c] = "");
+        newRow[cols[0]] = "Total Summary";
+        spreadsheetEngine.rows.push(newRow);
+      }
+
+      const targetColName = cols[parsedTarget.col];
+
+      // Batch Apply across line items if selected
+      if (formulaType === 'QTY_PRICE' && applyAll) {
+        const qIdx = cols.findIndex(c => /quantity|qty/i.test(c));
+        const pIdx = cols.findIndex(c => /price|rate/i.test(c));
+        const qLetter = String.fromCharCode(65 + ((qIdx !== -1 ? qIdx : 1) % 26));
+        const pLetter = String.fromCharCode(65 + ((pIdx !== -1 ? pIdx : 2) % 26));
+
+        spreadsheetEngine.rows.forEach((r, idx) => {
+          const rNum = idx + 2;
+          r[targetColName] = `=${qLetter}${rNum}*${pLetter}${rNum}`;
+        });
+      } else {
+        // Single Cell Assignment
+        spreadsheetEngine.rows[parsedTarget.row][targetColName] = formula;
+      }
+
+      spreadsheetEngine.recalculateAll();
+      spreadsheetEngine.render();
+
+      const computedVal = spreadsheetEngine.rows[parsedTarget.row]['__calc_' + targetColName] || FormulaEngine.evalFormula(formula, parsedTarget.row, spreadsheetEngine.rows, cols);
+      showError(`Formula ${formula} applied to ${targetRef}. Result: ${computedVal}`);
+      
+      closeFormulaAssistantPanel();
+    }
+
+    // ========================================================
+    // FEATURE 3 & 4: SAMPLE SCENARIOS & FILE HANDLING
+    // ========================================================
+    function loadSampleScenario(type) {
+      if (type === 'BILL') {
+        const headers = ["Item", "Quantity", "Unit Price", "Amount"];
+        const rows = [
+          { "Item": "Laser Barcode Scanner", "Quantity": "2", "Unit Price": "450.00", "Amount": "=B2*C2" },
+          { "Item": "USB-C Multiport Dock", "Quantity": "1", "Unit Price": "230.00", "Amount": "=B3*C3" },
+          { "Item": "Ergonomic Desk Stand", "Quantity": "3", "Unit Price": "120.00", "Amount": "=B4*C4" },
+          { "Item": "Wireless Numeric Keypad", "Quantity": "4", "Unit Price": "35.50", "Amount": "=B5*C5" }
+        ];
+        spreadsheetEngine.init(headers, rows);
+        document.getElementById('detected-type-chip').textContent = "Loaded: Invoice Line Items";
+        activeCellCoord = { row: 0, col: 3, colName: 'Amount' };
+        openFormulaAssistantPanel();
+      }
+    }
+
+    function handleFileSelected(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+      stageSelectedFile(file);
+    }
+
+    function stageSelectedFile(file) {
+      hideError();
+      const validTypes = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'];
+      if (!validTypes.includes(file.type) && !file.name.match(/\.(pdf|jpe?g|png|webp)$/i)) {
+        showError("Unsupported file type. Please upload a PDF or image.");
+        return;
+      }
+
+      stagedFile = file;
+      isProcessingCancelled = false;
+      const card = document.getElementById('file-meta-card');
+      card.classList.remove('hidden');
+      document.getElementById('file-meta-name').textContent = file.name;
+      document.getElementById('file-meta-details').textContent = `${file.type.toUpperCase()} &bull; ${(file.size / 1024).toFixed(1)} KB`;
+      document.getElementById('detected-type-chip').textContent = "Ready to Process";
+    }
+
+    function removeSelectedFile() {
+      stagedFile = null;
+      document.getElementById('file-meta-card').classList.add('hidden');
+      document.getElementById('primary-file-input').value = '';
+    }
+
+    function confirmClearAll() {
+      confirmAction("Clear Table & Form?", "This will reset all rows and clear data.", () => {
+        removeSelectedFile();
+        spreadsheetEngine.clearTable();
+      });
+    }
+
+    async function startProcessingStagedFile() {
+      if (!stagedFile) return;
+      if (stagedFile.type === 'application/pdf') {
+        await processPDFFile(stagedFile);
+      } else {
+        await processImageOCR(stagedFile);
+      }
+    }
+
+    async function processImageOCR(file) {
+      updateLoader(true, 'Running OCR Engine...', 20, 'Recognizing text...');
+      try {
+        const worker = await Tesseract.createWorker('eng');
+        const ret = await worker.recognize(file);
+        await worker.terminate();
+
+        const rawText = ret.data.text.trim();
+        if (!rawText) {
+          showError("No readable text detected in this image.");
+          updateLoader(false);
+          return;
+        }
+
+        document.getElementById('raw-text-content').textContent = rawText;
+        const result = parseImageAndBillData(rawText);
+        spreadsheetEngine.init(result.headers, result.rows);
+        updateLoader(false);
+
+      } catch (err) {
+        showError("OCR Error: " + err.message);
+        updateLoader(false);
+      }
+    }
+
+    function parseImageAndBillData(rawText) {
+      const lines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+      const headers = ["Item", "Quantity", "Unit Price", "Amount"];
+      const rows = [];
+      const pricePattern = /[$€£₹]?\s*(\d+[.,]\d{2})/g;
+
+      lines.forEach((line, idx) => {
+        const prices = [...line.matchAll(pricePattern)];
+        if (prices.length >= 1) {
+          const itemAmt = prices[prices.length - 1][1];
+          const unitPrice = prices.length > 1 ? prices[0][1] : itemAmt;
+          const qtyM = line.match(/\b([1-9][0-9]?)\b/);
+          const qty = qtyM ? qtyM[1] : '1';
+          const itemDesc = line.replace(itemAmt, '').replace(unitPrice, '').replace(/\b\d+\b/, '').replace(/[$€£₹]/g, '').trim();
+
+          if (itemDesc.length > 2) {
+            rows.push({
+              "Item": itemDesc,
+              "Quantity": qty,
+              "Unit Price": unitPrice,
+              "Amount": `=${String.fromCharCode(66)}${rows.length + 2}*${String.fromCharCode(67)}${rows.length + 2}`
+            });
+          }
+        }
+      });
+
+      if (rows.length === 0) {
+        lines.slice(0, 6).forEach((l, idx) => {
+          rows.push({
+            "Item": l,
+            "Quantity": "1",
+            "Unit Price": "100.00",
+            "Amount": `=${String.fromCharCode(66)}${idx + 2}*${String.fromCharCode(67)}${idx + 2}`
+          });
+        });
+      }
+
+      return { headers, rows };
+    }
+
+    // ========================================================
+    // PRESERVED WORKING SPATIAL PDF EXTRACTION
+    // ========================================================
+    async function processPDFFile(fileOrBlob) {
+      hideError();
+      updateLoader(true, 'Analyzing PDF...', 20, 'Clustering coordinates...');
+
+      try {
+        const arrayBuffer = await fileOrBlob.arrayBuffer();
+        // Try normal parsing first, then PDF.js recovery mode for PDFs with damaged XRef tables.
+        let pdf;
+        let firstError = null;
+        try {
+          pdf = await pdfjsLib.getDocument({
+            data: new Uint8Array(arrayBuffer.slice(0)),
+            stopAtErrors: false,
+            isEvalSupported: false,
+            useSystemFonts: true
+          }).promise;
+        } catch (err) {
+          firstError = err;
+          try {
+            pdf = await pdfjsLib.getDocument({
+              data: new Uint8Array(arrayBuffer.slice(0)),
+              stopAtErrors: false,
+              isEvalSupported: false,
+              useSystemFonts: true,
+              disableAutoFetch: true,
+              verbosity: 0
+            }).promise;
+          } catch (recoveryError) {
+            throw new Error('PDF kharab ya unsupported format mein hai. Pehle PDF ko Adobe/Google Drive mein kholkar “Print > Save as PDF” karein, phir dobara upload karein. Details: ' + (recoveryError.message || firstError.message || 'PDF read nahi hua.'));
+          }
+        }
+        let allPageLines = [];
+        let rawAccumulatedText = "";
+
+        for (let p = 1; p <= pdf.numPages; p++) {
+          const page = await pdf.getPage(p);
+          const textContent = await page.getTextContent();
+          if (textContent.items && textContent.items.length > 0) {
+            const parsedPage = parsePageTextItems(textContent.items);
+            allPageLines.push(...parsedPage.lines);
+            rawAccumulatedText += parsedPage.rawText + "\n";
+          }
+        }
+
+        document.getElementById('raw-text-content').textContent = rawAccumulatedText;
+        const tableData = structureLinesIntoTable(allPageLines);
+        if (!tableData) {
+          showError('Could not detect a table in this PDF.');
+          updateLoader(false);
+          return;
+        }
+
+        spreadsheetEngine.init(tableData.headers, tableData.rows);
+        updateLoader(false);
+      } catch (err) {
+        showError('PDF Processing Error: ' + err.message);
+        updateLoader(false);
+      }
+    }
+
+    function parsePageTextItems(items) {
+      const validItems = items
+        .filter(it => it.str && it.str.trim().length > 0)
+        .map(it => ({
+          str: it.str.trim(),
+          rawStr: it.str,
+          x: it.transform[4],
+          y: it.transform[5],
+          width: it.width || (it.str.length * 6)
+        }));
+
+      validItems.sort((a, b) => (Math.abs(b.y - a.y) > 3.5) ? (b.y - a.y) : (a.x - b.x));
+      const yGroups = [];
+      let currentGroup = [];
+      let currentY = null;
+
+      validItems.forEach(it => {
+        if (currentY === null || Math.abs(it.y - currentY) <= 3.5) {
+          currentGroup.push(it);
+          currentY = it.y;
+        } else {
+          yGroups.push(currentGroup);
+          currentGroup = [it];
+          currentY = it.y;
+        }
+      });
+      if (currentGroup.length > 0) yGroups.push(currentGroup);
+
+      const parsedLines = [];
+      let rawText = '';
+      yGroups.forEach(lineItems => {
+        lineItems.sort((a, b) => a.x - b.x);
+        const fullLineStr = lineItems.map(i => i.rawStr).join(' ');
+        rawText += fullLineStr + '\n';
+        parsedLines.push({ rawText: fullLineStr, items: lineItems, y: lineItems[0].y });
+      });
+      return { lines: parsedLines, rawText };
+    }
+
+    function structureLinesIntoTable(pageLines) {
+      if (pageLines.length === 0) return null;
+      let headerLineIdx = -1;
+      let headerItems = [];
+
+      for (let i = 0; i < pageLines.length; i++) {
+        const line = pageLines[i];
+        if (!line.items || line.items.length < 2) continue;
+        const chunks = clusterLineChunks(line.items);
+        if (chunks.length >= 2 && chunks.some(c => /no\.?|name|phone|city|department|amount/i.test(c.text))) {
+          headerLineIdx = i;
+          headerItems = chunks;
+          break;
+        }
+      }
+
+      if (headerLineIdx === -1) return null;
+      const headers = headerItems.map(h => h.text.trim());
+      const colBoundaries = [];
+      for (let i = 0; i < headerItems.length - 1; i++) {
+        colBoundaries.push((headerItems[i].x + headerItems[i + 1].x) / 2);
+      }
+
+      const structuredRows = [];
+      pageLines.slice(headerLineIdx + 1).forEach(line => {
+        if (!line.items || line.items.length === 0) return;
+        const lineChunks = clusterLineChunks(line.items);
+        if (lineChunks.length <= 1 && headers.length > 2) return;
+
+        const rowObj = {};
+        headers.forEach(h => rowObj[h] = "");
+        lineChunks.forEach(chunk => {
+          let colIdx = 0;
+          for (let b = 0; b < colBoundaries.length; b++) {
+            if (chunk.x > colBoundaries[b]) colIdx = b + 1;
+            else break;
+          }
+          if (colIdx < headers.length) {
+            const h = headers[colIdx];
+            rowObj[h] = rowObj[h] ? (rowObj[h] + " " + chunk.text) : chunk.text;
+          }
+        });
+
+        if (Object.values(rowObj).some(v => v.trim().length > 0)) {
+          structuredRows.push(rowObj);
+        }
+      });
+
+      return { headers, rows: structuredRows };
+    }
+
+    function clusterLineChunks(items) {
+      const chunks = [];
+      if (!items.length) return chunks;
+      let curText = items[0].str;
+      let curX = items[0].x;
+      let curEnd = items[0].x + items[0].width;
+
+      for (let i = 1; i < items.length; i++) {
+        const it = items[i];
+        if (it.x - curEnd > 13) {
+          chunks.push({ text: curText.trim(), x: curX, width: curEnd - curX });
+          curText = it.str;
+          curX = it.x;
+          curEnd = it.x + it.width;
+        } else {
+          curText += " " + it.str;
+          curEnd = Math.max(curEnd, it.x + it.width);
+        }
+      }
+      chunks.push({ text: curText.trim(), x: curX, width: curEnd - curX });
+      return chunks;
+    }
+
+    // 7-Person PDF Generator
+    function generateTestSamplePdfBlob() {
+      const content = `BT /F1 14 Tf 50 740 Td (COMPANY EMPLOYEE RECORDS 2026) Tj ET
+BT /F1 10 Tf 50 680 Td (No.) Tj 35 0 Td (Full Name) Tj 105 0 Td (Phone Number) Tj 105 0 Td (City) Tj 85 0 Td (Department) Tj 90 0 Td (Amount (Rs.)) Tj ET
+BT /F1 9 Tf 50 655 Td (1) Tj 35 0 Td (Amit Verma) Tj 105 0 Td (9000000001) Tj 105 0 Td (Surat) Tj 85 0 Td (Sales) Tj 90 0 Td (1250.00) Tj ET
+BT /F1 9 Tf 50 635 Td (2) Tj 35 0 Td (Neha Patel) Tj 105 0 Td (9000000002) Tj 105 0 Td (Ahmedabad) Tj 85 0 Td (Accounts) Tj 90 0 Td (980.50) Tj ET
+BT /F1 9 Tf 50 615 Td (3) Tj 35 0 Td (Imran Khan) Tj 105 0 Td (9000000003) Tj 105 0 Td (Vadodara) Tj 85 0 Td (Support) Tj 90 0 Td (1575.00) Tj ET
+BT /F1 9 Tf 50 595 Td (4) Tj 35 0 Td (Pooja Singh) Tj 105 0 Td (9000000004) Tj 105 0 Td (Rajkot) Tj 85 0 Td (Sales) Tj 90 0 Td (720.00) Tj ET
+BT /F1 9 Tf 50 575 Td (5) Tj 35 0 Td (Karan Shah) Tj 105 0 Td (9000000005) Tj 105 0 Td (Surat) Tj 85 0 Td (Inventory) Tj 90 0 Td (2100.00) Tj ET
+BT /F1 9 Tf 50 555 Td (6) Tj 35 0 Td (Sana Ali) Tj 105 0 Td (9000000006) Tj 105 0 Td (Bharuch) Tj 85 0 Td (Accounts) Tj 90 0 Td (845.25) Tj ET
+BT /F1 9 Tf 50 535 Td (7) Tj 35 0 Td (Rohit Das) Tj 105 0 Td (9000000007) Tj 105 0 Td (Navsari) Tj 85 0 Td (Support) Tj 90 0 Td (1320.00) Tj ET`;
+
+      // Build a valid PDF cross-reference table using real byte offsets.
+      const objects = [
+        '<< /Type /Catalog /Pages 2 0 R >>',
+        '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+        '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
+        `<< /Length ${bytes.length} >>\nstream\n${content}\nendstream`,
+        '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>'
+      ];
+      let pdf = '%PDF-1.4\n';
+      const offsets = [0];
+      objects.forEach((obj, index) => {
+        offsets.push(new TextEncoder().encode(pdf).length);
+        pdf += `${index + 1} 0 obj\n${obj}\nendobj\n`;
+      });
+      const startxref = new TextEncoder().encode(pdf).length;
+      pdf += `xref\n0 6\n0000000000 65535 f \n`;
+      for (let i = 1; i < offsets.length; i++) {
+        pdf += `${String(offsets[i]).padStart(10, '0')} 00000 n \n`;
+      }
+      pdf += `trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${startxref}\n%%EOF`;
+      return new Blob([pdf], { type: 'application/pdf' });
+    }
+
+    async function runSamplePdfTest() {
+      const blob = generateTestSamplePdfBlob();
+      stageSelectedFile(blob);
+      await processPDFFile(blob);
+    }
+
+    // ========================================================
+    // EXCEL EXPORT (PRESERVES FORMULAS & CELL FORMATTING)
+    // ========================================================
+    function exportToExcel() {
+      hideError();
+      const statusCard = document.getElementById('download-success-card');
+      const statusTitle = document.getElementById('download-status-title');
+      const statusDesc = document.getElementById('download-status-desc');
+      const againBtn = document.getElementById('download-again-btn');
+
+      try {
+        if (!window.XLSX || !XLSX.utils || !XLSX.write) {
+          showError('Excel library load nahi hui. Internet connection check karke page ko dobara open karein.');
+          return;
+        }
+        if (!spreadsheetEngine.rows || !spreadsheetEngine.rows.length || !spreadsheetEngine.columns || !spreadsheetEngine.columns.length) {
+          showError('Download karne ke liye pehle spreadsheet mein data hona chahiye.');
+          return;
+        }
+
+        const columns = spreadsheetEngine.columns;
+        const rowsToExport = spreadsheetEngine.rows;
+        const aoaData = [columns.slice()];
+        rowsToExport.forEach(r => aoaData.push(columns.map(col => {
+          const v = r[col];
+          return v === null || v === undefined ? '' : v;
+        })));
+
+        const wb = XLSX.utils.book_new();
+        const ws = XLSX.utils.aoa_to_sheet(aoaData, { raw: true });
+        const headerStyle = {
+          fill: { fgColor: { rgb: '1E40AF' } },
+          font: { name: 'Calibri', sz: 11, bold: true, color: { rgb: 'FFFFFF' } },
+          alignment: { vertical: 'center', horizontal: 'center' }
+        };
+        columns.forEach((col, cIdx) => {
+          const ref = XLSX.utils.encode_cell({ r: 0, c: cIdx });
+          if (ws[ref]) ws[ref].s = headerStyle;
+        });
+
+        rowsToExport.forEach((r, rIdx) => {
+          const sheetRow = rIdx + 1;
+          const bgRgb = rIdx % 2 === 0 ? 'F0F7FF' : 'FFFFFF';
+          columns.forEach((col, cIdx) => {
+            const addr = XLSX.utils.encode_cell({ r: sheetRow, c: cIdx });
+            if (!ws[addr]) return;
+            const raw = r[col];
+            const val = raw === null || raw === undefined ? '' : String(raw).trim();
+            if (val.startsWith('=')) {
+              ws[addr].f = val.slice(1);
+              const calculated = r['__calc_' + col];
+              if (calculated !== undefined && calculated !== null && calculated !== '') {
+                const numeric = Number(calculated);
+                ws[addr].v = Number.isFinite(numeric) ? numeric : calculated;
+                ws[addr].t = Number.isFinite(numeric) ? 'n' : 's';
+              }
+            } else if (/phone|mobile/i.test(col) || /^0\d+$/.test(val)) {
+              ws[addr].t = 's';
+              ws[addr].v = val;
+              ws[addr].z = '@';
+            }
+            ws[addr].s = {
+              fill: { fgColor: { rgb: bgRgb } },
+              alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
+              border: {
+                top: { style: 'thin', color: { rgb: 'CBD5E1' } },
+                bottom: { style: 'thin', color: { rgb: 'CBD5E1' } },
+                left: { style: 'thin', color: { rgb: 'CBD5E1' } },
+                right: { style: 'thin', color: { rgb: 'CBD5E1' } }
+              }
+            };
+          });
+        });
+
+        ws['!cols'] = columns.map(c => ({ wch: Math.min(40, Math.max(String(c).length + 5, 14)) }));
+        ws['!rows'] = [{ hpt: 24 }, ...rowsToExport.map(() => ({ hpt: 21 }))];
+        ws['!views'] = [{ state: 'frozen', ySplit: 1, activeCell: 'A2' }];
+        XLSX.utils.book_append_sheet(wb, ws, 'Extracted Data');
+
+        const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array', cellStyles: true });
+        const blob = new Blob([wbout], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        if (!blob.size) throw new Error('Excel file khaali bani hai.');
+        const filename = 'AI_Data_Entry_Export.xlsx';
+        if (activeExcelBlobUrl) URL.revokeObjectURL(activeExcelBlobUrl);
+        activeExcelBlobUrl = URL.createObjectURL(blob);
+
+        // Keep a visible manual download link: Android browsers may block scripted downloads.
+        againBtn.href = activeExcelBlobUrl;
+        againBtn.download = filename;
+        againBtn.classList.remove('hidden');
+        statusTitle.textContent = 'Excel file ready';
+        statusDesc.textContent = 'Agar download apne aap shuru nahi hua, neeche “Download Excel Again” dabayein. File aam taur par Downloads folder mein milegi.';
+        statusCard.classList.remove('hidden');
+
+        const link = document.createElement('a');
+        link.href = activeExcelBlobUrl;
+        link.download = filename;
+        link.style.display = 'none';
+        link.setAttribute('aria-hidden', 'true');
+        document.body.appendChild(link);
+        link.click();
+        setTimeout(() => { if (link.parentNode) link.parentNode.removeChild(link); }, 1500);
+      } catch (err) {
+        console.error('Excel export failed:', err);
+        showError('Excel download nahi ho saka: ' + (err && err.message ? err.message : 'unknown error') + '. Neeche diye gaye CSV download ko bhi try kar sakte hain.');
+      }
+    }
+
+    function exportToCSV() {
+      if (!spreadsheetEngine.rows.length) return;
+      const headers = spreadsheetEngine.columns;
+      const rows = spreadsheetEngine.rows;
+      const csvRows = [headers.map(h => `"${h.replace(/"/g, '""')}"`).join(",")];
+
+      rows.forEach(r => {
+        csvRows.push(headers.map(h => {
+          const val = r['__calc_' + h] !== undefined ? r['__calc_' + h] : (r[h] || '');
+          return `"${String(val).replace(/"/g, '""')}"`;
+        }).join(","));
+      });
+
+      const blob = new Blob([csvRows.join("\r\n")], { type: 'text/csv;charset=utf-8;' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = "AI_Data_Entry_Export.csv";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+
+    // ========================================================
+    // UI UTILITIES
+    // ========================================================
+    function switchTab(tabId) {
+      // Show only the selected feature panel; all features remain in this one HTML file.
+      document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+      document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.classList.remove('border-white', 'text-white');
+        btn.classList.add('border-transparent', 'text-blue-200');
+      });
+
+      const section = document.getElementById(tabId);
+      if (section) section.classList.remove('hidden');
+
+      const btnMap = {
+        'upload-tab': 'tab-btn-upload',
+        'columns-tab': 'tab-btn-columns',
+        'invoice-entry-panel': 'tab-btn-invoice',
+        'invoice-history-panel': 'tab-btn-history',
+        'stock-panel': 'tab-btn-stock',
+        'sales-report-panel': 'tab-btn-sales',
+        'profit-calculator-panel': 'tab-btn-profit',
+        'backup-panel': 'tab-btn-backup'
+      };
+      const activeBtn = document.getElementById(btnMap[tabId]);
+      if (activeBtn) {
+        activeBtn.classList.add('border-white', 'text-white');
+        activeBtn.classList.remove('border-transparent', 'text-blue-200');
+      }
+      if (tabId !== 'upload-tab' && tabId !== 'columns-tab') {
+        section?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }
+
+    function populateFilterDropdown() {
+      const select = document.getElementById('filter-col-select');
+      select.innerHTML = '';
+      spreadsheetEngine.columns.forEach(col => {
+        const opt = document.createElement('option');
+        opt.value = col;
+        opt.textContent = col;
+        select.appendChild(opt);
+      });
+      spreadsheetEngine.filterCol = spreadsheetEngine.columns[0] || null;
+    }
+
+    function updateColumnFilterInput() {
+      spreadsheetEngine.filterCol = document.getElementById('filter-col-select').value;
+      applyFilters();
+    }
+
+    function applyFilters() {
+      spreadsheetEngine.globalQuery = document.getElementById('global-search').value.trim();
+      spreadsheetEngine.filterVal = document.getElementById('filter-val-input').value.trim();
+      spreadsheetEngine.render();
+    }
+
+    function clearCurrentFilter() {
+      document.getElementById('filter-val-input').value = '';
+      applyFilters();
+    }
+
+    function toggleSelectAll(cb) {
+      if (cb.checked) spreadsheetEngine.rows.forEach((_, idx) => spreadsheetEngine.selectedRows.add(idx));
+      else spreadsheetEngine.selectedRows.clear();
+      spreadsheetEngine.render();
+    }
+
+    function toggleRowSelection(idx, cb) {
+      if (cb.checked) spreadsheetEngine.selectedRows.add(idx);
+      else spreadsheetEngine.selectedRows.delete(idx);
+    }
+
+    function updateSummaryTotal() {
+      const totalCol = spreadsheetEngine.columns.find(c => /amount|salary|total|price/i.test(c));
+      const totalDisplay = document.getElementById('table-total-sum');
+      if (!totalCol) {
+        totalDisplay.textContent = '';
+        return;
+      }
+      let sum = 0;
+      spreadsheetEngine.rows.forEach(r => {
+        const val = r['__calc_' + totalCol] !== undefined ? r['__calc_' + totalCol] : r[totalCol];
+        const num = parseFloat(String(val || '').replace(/[^0-9.-]+/g, ''));
+        if (!isNaN(num)) sum += num;
+      });
+      totalDisplay.innerHTML = `<span class="text-slate-500 font-normal">Sum:</span> ₹${sum.toFixed(2)}`;
+    }
+
+    function promptAddColumn() {
+      const name = prompt("Enter new column name:");
+      if (name) spreadsheetEngine.addColumn(name);
+    }
+
+    function promptRenameColumn(oldName) {
+      const name = prompt(`Rename column "${oldName}" to:`, oldName);
+      if (name) spreadsheetEngine.renameColumn(oldName, name);
+    }
+
+    function highlightDuplicateRecords() {
+      const keyCol = spreadsheetEngine.columns[0];
+      const seen = new Set();
+      let dupCount = 0;
+      const trs = document.querySelectorAll('#table-body tr');
+      spreadsheetEngine.rows.forEach((r, idx) => {
+        const val = String(r[keyCol] || '').toLowerCase().trim();
+        if (val && seen.has(val)) {
+          dupCount++;
+          if (trs[idx]) trs[idx].classList.add('duplicate-row');
+        } else {
+          seen.add(val);
+          if (trs[idx]) trs[idx].classList.remove('duplicate-row');
+        }
+      });
+      showError(dupCount > 0 ? `Found ${dupCount} duplicate record(s) on ${keyCol}.` : "No duplicates found.");
+    }
+
+    function openExportPreview() {
+      if (!spreadsheetEngine.rows.length) {
+        showError("No data to preview.");
+        return;
+      }
+      document.getElementById('preview-col-count').textContent = spreadsheetEngine.columns.length;
+      document.getElementById('preview-row-count').textContent = spreadsheetEngine.rows.length;
+
+      const headerRow = document.getElementById('preview-table-header');
+      headerRow.innerHTML = `<th class="row-idx" style="width:40px;">#</th>`;
+      spreadsheetEngine.columns.forEach(col => {
+        const th = document.createElement('th');
+        th.textContent = col;
+        headerRow.appendChild(th);
+      });
+
+      const tbody = document.getElementById('preview-table-body');
+      tbody.innerHTML = '';
+      spreadsheetEngine.rows.forEach((r, idx) => {
+        const tr = document.createElement('tr');
+        let html = `<td class="row-idx font-mono text-[11px]">${idx + 1}</td>`;
+        spreadsheetEngine.columns.forEach(col => {
+          const val = r['__calc_' + col] !== undefined ? r['__calc_' + col] : (r[col] || '');
+          html += `<td>${escapeHTML(String(val))}</td>`;
+        });
+        tr.innerHTML = html;
+        tbody.appendChild(tr);
+      });
+
+      document.getElementById('export-preview-modal').classList.remove('hidden');
+    }
+
+    function closeExportPreview() {
+      document.getElementById('export-preview-modal').classList.add('hidden');
+    }
+
+    let confirmCallback = null;
+    function confirmAction(title, msg, onConfirm) {
+      document.getElementById('modal-title').textContent = title;
+      document.getElementById('modal-msg').textContent = msg;
+      confirmCallback = onConfirm;
+      document.getElementById('confirm-modal').classList.remove('hidden');
+    }
+
+    function closeConfirmModal(confirmed) {
+      document.getElementById('confirm-modal').classList.add('hidden');
+      if (confirmed && confirmCallback) confirmCallback();
+      confirmCallback = null;
+    }
+
+    function confirmResetTable() {
+      confirmAction("Reset Table?", "This will discard edits and recalculate original values.", () => {
+        spreadsheetEngine.init(spreadsheetEngine.columns, spreadsheetEngine.initialBackup);
+      });
+    }
+
+    function updateLoader(show, text = 'Processing...', progress = 0, subtext = '') {
+      const loader = document.getElementById('loader');
+      if (!show) {
+        loader.classList.add('hidden');
+        return;
+      }
+      loader.classList.remove('hidden');
+      document.getElementById('loader-status').textContent = text;
+      document.getElementById('loader-bar').style.width = `${progress}%`;
+      document.getElementById('loader-subtext').textContent = subtext;
+    }
+
+    function showError(msg) {
+      const errBox = document.getElementById('error-box');
+      document.getElementById('error-message').textContent = msg;
+      errBox.classList.remove('hidden');
+    }
+
+    function hideError() {
+      document.getElementById('error-box').classList.add('hidden');
+    }
+
+    function escapeHTML(str) {
+      if (!str) return '';
+      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // Startup Test Flow
+    window.addEventListener('DOMContentLoaded', () => {
+      try {
+        const saved = JSON.parse(localStorage.getItem('aiDataEntryPro_spreadsheet_v1') || 'null');
+        if (saved && Array.isArray(saved.columns) && Array.isArray(saved.rows) && saved.columns.length) {
+          spreadsheetEngine.init(saved.columns, saved.rows);
+          const st = document.getElementById('manual-entry-status');
+          if (st) st.textContent = '✓ Pichhla spreadsheet data device se restore ho gaya.';
+        } else loadSampleScenario('BILL');
+      } catch(e) { loadSampleScenario('BILL'); }
+    });
+  </script>
+<script>
+
+  // Manual invoice bill entry
+  const invoiceItems = [];
+  (function setInvoiceDate(){ const d=document.getElementById('inv-date'); if(d) d.value=new Date().toISOString().slice(0,10); })();
+  function invoiceMoney(n){ return '₹' + Number(n||0).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+  function invoiceRender(){
+    const body=document.getElementById('invoice-items-body');
+    if(!invoiceItems.length){body.innerHTML='<tr><td colspan="6" class="p-4 text-center text-slate-500">Abhi koi item add nahi hua.</td></tr>';}
+    else body.innerHTML=invoiceItems.map((it,i)=>`<tr class="border-t"><td class="p-2">${i+1}</td><td class="p-2">${escapeHTML(it.name)}</td><td class="p-2 text-right">${it.qty}</td><td class="p-2 text-right">${invoiceMoney(it.price)}</td><td class="p-2 text-right">${invoiceMoney(it.qty*it.price)}</td><td class="p-2 text-center"><button onclick="invoiceRemoveItem(${i})" class="text-red-600 font-bold">✕</button></td></tr>`).join('');
+    document.getElementById('invoice-total').textContent=invoiceMoney(invoiceItems.reduce((a,it)=>a+it.qty*it.price,0));
+  }
+  function invoiceAddItem(){
+    const name=document.getElementById('inv-item').value.trim(), qty=Number(document.getElementById('inv-qty').value), price=Number(document.getElementById('inv-price').value);
+    if(!name){alert('Item ka naam bharein.');return;} if(!(qty>0)||!Number.isFinite(qty)){alert('Sahi quantity bharein.');return;} if(!(price>=0)||document.getElementById('inv-price').value===''){alert('Sahi unit price bharein.');return;}
+    invoiceItems.push({name,qty,price}); document.getElementById('inv-item').value=''; document.getElementById('inv-qty').value='1'; document.getElementById('inv-price').value=''; invoiceRender();
+  }
+  function invoiceRemoveItem(i){invoiceItems.splice(i,1);invoiceRender();}
+  function invoiceClearAll(){if(!confirm('Poora bill clear karna hai?'))return;invoiceItems.splice(0,invoiceItems.length);invoiceRender();}
+  const HISTORY_KEY='aiDataEntryPro_invoiceHistory_v1';
+  const STOCK_KEY='aiDataEntryPro_stock_v1';
+  let invoiceHistory=readLocal(HISTORY_KEY,[]), stockItems=readLocal(STOCK_KEY,[]);
+  function readLocal(key,fallback){try{const v=JSON.parse(localStorage.getItem(key)||'null');return Array.isArray(v)?v:fallback;}catch(e){return fallback;}}
+  const BACKUP_KEY='aiDataEntryPro_autoBackup_v1';
+  function refreshAutoBackup(){try{const snap={app:'AI Data Entry Pro',version:1,savedAt:new Date().toISOString(),invoiceHistory:JSON.parse(localStorage.getItem(HISTORY_KEY)||'[]'),stockItems:JSON.parse(localStorage.getItem(STOCK_KEY)||'[]')};localStorage.setItem(BACKUP_KEY,JSON.stringify(snap));const el=document.getElementById('backup-status');if(el)el.textContent='Automatic backup updated: '+new Date(snap.savedAt).toLocaleString();}catch(e){const el=document.getElementById('backup-status');if(el)el.textContent='Auto backup save nahi ho saka. Backup file download kar lein.';}}
+  function writeLocal(key,value){try{localStorage.setItem(key,JSON.stringify(value));refreshAutoBackup();if(window.__aiDataCloud){clearTimeout(window.__aiCloudSaveTimer);window.__aiCloudSaveTimer=setTimeout(()=>window.saveAllToFirebase(true),800);}return true;}catch(e){alert('Data save nahi ho saka. Browser storage full ya blocked ho sakta hai.');return false;}}
+  function downloadShopBackup(){refreshAutoBackup();const snap={app:'AI Data Entry Pro',version:1,exportedAt:new Date().toISOString(),invoiceHistory,stockItems};const blob=new Blob([JSON.stringify(snap,null,2)],{type:'application/json'});const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='AI_Data_Entry_Pro_Backup_'+new Date().toISOString().slice(0,10)+'.json';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1500);}
+  function restoreShopBackup(event){const file=event.target.files&&event.target.files[0];if(!file)return;const reader=new FileReader();reader.onload=()=>{try{const data=JSON.parse(reader.result);if(!Array.isArray(data.invoiceHistory)||!Array.isArray(data.stockItems))throw new Error('format');if(!confirm('Restore karne se is browser ka current bill history aur stock replace ho jayega. Pehle current backup download karna behtar hai. Continue?'))return;invoiceHistory=data.invoiceHistory;stockItems=data.stockItems;if(!writeLocal(HISTORY_KEY,invoiceHistory)||!writeLocal(STOCK_KEY,stockItems))return;renderHistory();renderStock();renderSales();refreshAutoBackup();alert('Backup restore ho gaya.');}catch(e){alert('Backup file sahi nahi hai. AI Data Entry Pro ki JSON backup file select karein.');}finally{event.target.value='';}};reader.readAsText(file);}
+  function calculateProfit(){const sales=Number(document.getElementById('profit-sales').value||0),cost=Number(document.getElementById('profit-cost').value||0),expenses=Number(document.getElementById('profit-expenses').value||0);const net=sales-cost-expenses,margin=sales>0?(net/sales)*100:0;document.getElementById('profit-result').textContent=invoiceMoney(net);document.getElementById('profit-result').className='text-2xl font-bold '+(net<0?'text-red-700':'text-emerald-700');document.getElementById('profit-margin').textContent=(Math.round(margin*100)/100)+'%';document.getElementById('profit-status').textContent=(sales===0&&cost===0&&expenses===0)?'Details bharein':net>0?'Profit':net<0?'Loss':'Break-even';}
+  function clearProfitCalculator(){['profit-sales','profit-cost','profit-expenses'].forEach(id=>document.getElementById(id).value='');calculateProfit();}
+
+  function invoiceSaveToHistory(){
+    if(!invoiceItems.length){alert('Pehle kam se kam ek item add karein.');return;}
+    const billNo=document.getElementById('inv-billno').value.trim()||('INV-'+Date.now().toString().slice(-6));
+    if(invoiceHistory.some(b=>b.billNo===billNo)){if(!confirm('Is bill number ka record pehle se hai. Naya record phir bhi save karein?'))return;}
+    const bill={id:Date.now(),billNo,date:document.getElementById('inv-date').value||new Date().toISOString().slice(0,10),shop:document.getElementById('inv-shop').value.trim(),customer:document.getElementById('inv-customer').value.trim(),items:invoiceItems.map(x=>({...x})),total:invoiceItems.reduce((a,it)=>a+it.qty*it.price,0)};
+    invoiceHistory.unshift(bill);if(!writeLocal(HISTORY_KEY,invoiceHistory)){invoiceHistory.shift();return;}
+    bill.items.forEach(it=>{const st=stockItems.find(x=>x.name.toLowerCase()===it.name.toLowerCase());if(st)st.qty=Math.max(0,Number(st.qty)-Number(it.qty));});writeLocal(STOCK_KEY,stockItems);renderHistory();renderStock();renderSales();alert('Bill history mein save ho gaya.');
+  }
+  function invoiceResetForNew(){if(invoiceItems.length&&!confirm('Naya bill shuru karein? Current bill history mein save nahi hoga jab tak Save Bill nahi dabayenge.'))return;invoiceItems.splice(0,invoiceItems.length);['inv-item','inv-price','inv-customer','inv-billno'].forEach(id=>document.getElementById(id).value='');document.getElementById('inv-qty').value='1';document.getElementById('inv-date').value=new Date().toISOString().slice(0,10);invoiceRender();}
+  function renderHistory(){const body=document.getElementById('invoice-history-body');if(!invoiceHistory.length){body.innerHTML='<tr><td colspan="6" class="p-3 text-center">Abhi koi saved bill nahi.</td></tr>';return;}body.innerHTML=invoiceHistory.map(b=>`<tr class="border-t"><td class="p-2">${escapeHTML(b.billNo)}</td><td class="p-2">${escapeHTML(b.date)}</td><td class="p-2">${escapeHTML(b.customer||'—')}</td><td class="p-2">${escapeHTML(b.shop||'—')}</td><td class="p-2 text-right">${invoiceMoney(b.total)}</td><td class="p-2 text-center whitespace-nowrap"><button class="text-blue-700 underline mr-2" onclick="invoiceLoadSaved(${b.id})">View</button><button class="text-red-600 underline" onclick="invoiceDeleteSaved(${b.id})">Delete</button></td></tr>`).join('');}
+  function invoiceLoadSaved(id){const b=invoiceHistory.find(x=>x.id===id);if(!b)return;switchTab('invoice-entry-panel');document.getElementById('inv-shop').value=b.shop||'';document.getElementById('inv-billno').value=b.billNo;document.getElementById('inv-date').value=b.date;document.getElementById('inv-customer').value=b.customer||'';invoiceItems.splice(0,invoiceItems.length,...b.items.map(x=>({...x})));invoiceRender();document.getElementById('invoice-entry-panel').scrollIntoView({behavior:'smooth'});}
+  function invoiceDeleteSaved(id){if(!confirm('Is saved bill ko delete karna hai?'))return;invoiceHistory=invoiceHistory.filter(b=>b.id!==id);writeLocal(HISTORY_KEY,invoiceHistory);renderHistory();renderSales();}
+  function stockAddOrUpdate(){const name=document.getElementById('stock-name').value.trim(),qty=Number(document.getElementById('stock-qty').value),price=Number(document.getElementById('stock-price').value||0);if(!name){alert('Item name bharein.');return;}if(!(qty>=0)||!Number.isFinite(qty)||!(price>=0)){alert('Quantity aur price sahi bharein.');return;}let st=stockItems.find(x=>x.name.toLowerCase()===name.toLowerCase());if(st){st.qty=Number(st.qty)+qty;st.price=price;}else stockItems.push({name,qty,price});if(writeLocal(STOCK_KEY,stockItems)){document.getElementById('stock-name').value='';document.getElementById('stock-qty').value='';document.getElementById('stock-price').value='';renderStock();}}
+  function renderStock(){const body=document.getElementById('stock-body');if(!stockItems.length){body.innerHTML='<tr><td colspan="4" class="p-3 text-center">Stock empty hai.</td></tr>';return;}body.innerHTML=stockItems.map((x,i)=>`<tr class="border-t"><td class="p-2">${escapeHTML(x.name)}</td><td class="p-2 text-right">${x.qty}</td><td class="p-2 text-right">${invoiceMoney(x.price)}</td><td class="p-2 text-center"><button onclick="stockDelete(${i})" class="text-red-600 underline">Delete</button></td></tr>`).join('');}
+  function stockDelete(i){if(!confirm('Stock item delete karein?'))return;stockItems.splice(i,1);writeLocal(STOCK_KEY,stockItems);renderStock();}
+  function renderSales(){const today=new Date().toISOString().slice(0,10),todays=invoiceHistory.filter(b=>b.date===today),sum=arr=>arr.reduce((a,b)=>a+Number(b.total||0),0);document.getElementById('sales-today-count').textContent=todays.length;document.getElementById('sales-today-total').textContent=invoiceMoney(sum(todays));document.getElementById('sales-all-total').textContent=invoiceMoney(sum(invoiceHistory));}
+  function salesExportCsv(){const rows=[['Bill No','Date','Shop','Customer','Total'],...invoiceHistory.map(b=>[b.billNo,b.date,b.shop,b.customer,b.total])];const csv=rows.map(r=>r.map(v=>'"'+String(v??'').replace(/"/g,'""')+'"').join(',')).join('\r\n');const blob=new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8;'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='sales-report.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+  renderHistory();renderStock();renderSales();refreshAutoBackup();calculateProfit();
+
+  function invoicePrintPdf(){
+    if(!invoiceItems.length){alert('PDF banane se pehle kam se kam ek item add karein.');return;}
+    const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const total=invoiceItems.reduce((a,it)=>a+it.qty*it.price,0); const money=n=>'₹'+Number(n).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
+    const rows=invoiceItems.map((it,i)=>`<tr><td>${i+1}</td><td>${esc(it.name)}</td><td class="num">${it.qty}</td><td class="num">${money(it.price)}</td><td class="num">${money(it.qty*it.price)}</td></tr>`).join('');
+    const w=window.open('','_blank'); if(!w){alert('Popup block ho raha hai. Chrome mein is file ke liye pop-ups allow karein.');return;}
+    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Invoice ${esc(document.getElementById('inv-billno').value||'')}</title><style>body{font-family:Arial,sans-serif;padding:28px;color:#111}h1{text-align:center} .meta{display:flex;justify-content:space-between;margin:24px 0}table{width:100%;border-collapse:collapse;margin-top:18px}th,td{border:1px solid #777;padding:10px}th{background:#eee}.num{text-align:right}.total{text-align:right;font-size:20px;font-weight:bold;margin-top:22px}@media print{button{display:none}}</style></head><body><h1>${esc(document.getElementById('inv-shop').value||'INVOICE / BILL')}</h1><div style="text-align:center;margin-top:-12px;margin-bottom:18px;font-size:18px;font-weight:bold">INVOICE / BILL</div><div class="meta"><div><b>Bill No:</b> ${esc(document.getElementById('inv-billno').value||'—')}<br><b>Date:</b> ${esc(document.getElementById('inv-date').value||'—')}</div><div><b>Customer:</b> ${esc(document.getElementById('inv-customer').value||'—')}</div></div><table><thead><tr><th>#</th><th>Item / Description</th><th>Quantity</th><th>Unit Price</th><th>Amount</th></tr></thead><tbody>${rows}</tbody></table><div class="total">Total Amount: ${money(total)}</div><p>Thank you!</p><script>window.onload=()=>setTimeout(()=>window.print(),300);<\/script></body></html>`);w.document.close();
+  }
+
+</script>
+</body>
+</html>
